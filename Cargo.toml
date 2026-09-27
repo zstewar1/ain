@@ -1,6 +1,12 @@
 [package]
-name = "a7i"
+name = "ain"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["std"]
+std = ["alloc", "ascii/std"]
+alloc = ["ascii/alloc"]
+
 [dependencies]
+ascii = { version = "1.1.0", default-features = false }
