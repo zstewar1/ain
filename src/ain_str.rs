@@ -1,142 +1,142 @@
-#[cfg(feature = "alloc")]
-use alloc::{borrow::ToOwned, boxed::Box};
+use core::borrow::{Borrow, BorrowMut};
+use core::cmp::Ordering;
+use core::fmt;
+use core::hash::Hash;
 use core::ops::{Index, IndexMut};
-use core::slice::{Iter, IterMut, SliceIndex};
-use core::{fmt, slice};
+use core::slice::SliceIndex;
 
-pub use ascii::AsAsciiStrError as AsAinStrError;
-use ascii::{AsAsciiStr, AsMutAsciiStr, AsciiChar, AsciiStr};
+use crate::iter::{
+    Chars, CharsMut, Lines, LinesMut, RSplit, RSplitMut, RSplitN, RSplitNMut, Split, SplitMut,
+    SplitN, SplitNMut,
+};
+use crate::pattern::{DoubleEndedPattern, Pattern, SearchHolder};
+use crate::validation::run_ain_validation;
+use crate::{AinChar, AinValidationError};
 
-use crate::AinChar;
-#[cfg(feature = "alloc")]
-use crate::AinString;
-
-/// [`AinStr`] represents a byte or string slice that only contains ASCII characters.
+/// [`AinStr`] represents a string slice that only contains ASCII characters, and has
+/// case-insensitive comparisons.
 ///
-/// It wraps an [`AinChar`] and implements many of `str`s methods and traits.
+/// It wraps a slice of [`AinChar`] and implements many of `str`s methods and traits.
 ///
-/// It can be created by a checked conversion from a `str` or `[u8]`, or borrowed from an
-/// `AinString`.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// It can be created from a literal with the [`ain!`] macro, or by a checked conversion from a
+/// `str` or `[u8]`, or borrowed from an `AinString`.
+///
+/// For Ord, the 'case insensitive' order is to treat all characters as uppercase. This affects the
+/// sort order of letters relative to the following symbols, which lie between uppercase and
+/// lowercase ascii: `` [\]^_` ``
+// We could derive PartialEq, Ord, and PartialOrd,  but we can better ensure autovectorization
+// by writing them ourselves.
+#[derive(Eq)]
 #[repr(transparent)]
 pub struct AinStr {
-    slice: [AinChar],
+    pub(crate) slice: [AinChar],
 }
 
 // This is mostly copied from ascii::AsciiStr.
 impl AinStr {
-    pub const EMPTY: &'static AinStr = AinStr::new("");
-
-    /// Converts `&self` to a `&str` slice.
+    /// Gets an empty `&'static AinStr` constant.
+    #[must_use]
     #[inline]
-    #[must_use]
-    pub const fn as_str(&self) -> &str {
-        // SAFETY: All variants of `AinChar` are valid bytes for a `str`.
-        unsafe { &*(self as *const AinStr as *const str) }
+    pub const fn empty() -> &'static AinStr {
+        AinStr::from_slice(&[])
     }
 
-    /// Converts `&self` into a byte slice.
+    /// Gets an empty `&'static mut AinStr` constant.
+    #[must_use]
     #[inline]
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8] {
-        // SAFETY: All variants of `AinChar` are valid `u8`, given they're `repr(u8)` via AsciiChar.
-        unsafe { &*(self as *const AinStr as *const [u8]) }
+    pub const fn empty_mut() -> &'static mut AinStr {
+        AinStr::from_slice_mut(&mut [])
     }
 
-    /// Returns the entire string as slice of `AinChar`s.
-    #[inline]
-    #[must_use]
-    pub const fn as_slice(&self) -> &[AinChar] {
-        &self.slice
-    }
-
-    /// Returns the entire string as mutable slice of `AinChar`s.
-    #[inline]
-    #[must_use]
-    pub const fn as_mut_slice(&mut self) -> &mut [AinChar] {
-        &mut self.slice
-    }
-
-    /// Returns a raw pointer to the `AinStr`'s buffer.
-    ///
-    /// The caller must ensure that the slice outlives the pointer this function returns, or else it
-    /// will end up pointing to garbage. Modifying the `AinStr` may cause it's buffer to be
-    /// reallocated, which would also make any pointers to it invalid.
-    #[inline]
-    #[must_use]
-    pub const fn as_ptr(&self) -> *const AinChar {
-        self.as_slice().as_ptr()
-    }
-
-    /// Returns an unsafe mutable pointer to the `AinStr`'s buffer.
-    ///
-    /// The caller must ensure that the slice outlives the pointer this function returns, or else it
-    /// will end up pointing to garbage. Modifying the `AinStr` may cause it's buffer to be
-    /// reallocated, which would also make any pointers to it invalid.
-    #[inline]
-    #[must_use]
-    pub const fn as_mut_ptr(&mut self) -> *mut AinChar {
-        self.as_mut_slice().as_mut_ptr()
-    }
-
-    /// Copies the content of this `AinStr` into an owned `AinString`.
-    #[cfg(feature = "alloc")]
-    #[must_use]
-    pub fn to_ain_string(&self) -> AinString {
-        use crate::AinString;
-
-        AinString::from(self.slice.to_vec())
-    }
-
-    /// Creates an &[AinStr] from a &[str]. The input must be valid ascii. This is intended for
-    /// primarily for usage in constants. Panics if the input is not valid ASCII.
-    pub const fn new(s: &str) -> &Self {
-        assert!(s.is_ascii());
-        // SAFETY: we checked that it's valid ascii and otherwise they're both u8 bytes.
-        let ptr = s as *const str as *const AinStr;
-        unsafe { &*ptr }
-    }
-
-    /// Converts anything that can represent a byte slice into an `AinStr`.
-    ///
-    /// # Errors
-    /// If `bytes` contains a non-ascii byte, `Err` will be returned
+    /// Converts a slice of [AinChar] to an `AinStr`.
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinStr;
-    /// let foo = AinStr::from_ascii(b"foo");
-    /// let err = AinStr::from_ascii("Ŋ");
-    /// assert_eq!(foo.unwrap().as_str(), "foo");
-    /// assert_eq!(err.unwrap_err().valid_up_to(), 0);
+    /// # use ain::{AinStr, ain};
+    /// let foo = AinStr::from_slice(&[ain!('f'), ain!('o'), ain!('o')]);
+    /// assert_eq!(foo.as_str(), "foo");
     /// ```
+    #[must_use]
     #[inline]
-    pub fn from_ascii<B>(bytes: &B) -> Result<&AinStr, AsAinStrError>
-    where
-        B: AsAinStr + ?Sized,
-    {
-        bytes.as_ain_str()
+    pub const fn from_slice(slice: &[AinChar]) -> &Self {
+        // SAFETY: We're going from one slice to another slice with identical repr and lifetime.
+        unsafe { &*(slice as *const [AinChar] as *const AinStr) }
     }
 
-    /// Converts anything that can be represented as a byte slice to an `AinStr` without checking
-    /// for non-ASCII characters.
+    /// Converts a mutable slice of [AinChar] to an `AinStr`.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::{ain, AinStr};
+    /// let mut chars = [ain!('f'), ain!('o'), ain!('o')];
+    /// let foo = AinStr::from_slice_mut(&mut chars);
+    /// assert_eq!(foo.as_str(), "foo");
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn from_slice_mut(slice: &mut [AinChar]) -> &mut Self {
+        // SAFETY: We're going from one slice to another slice with identical repr and lifetime.
+        unsafe { &mut *(slice as *mut [AinChar] as *mut AinStr) }
+    }
+
+    /// Convert a string slice to an AinStr. Errors if the str is not ASCII.
+    #[inline]
+    pub const fn from_str(s: &str) -> Result<&AinStr, AinValidationError> {
+        Self::from_ascii(s.as_bytes())
+    }
+
+    /// Convert a mutable string slice to an AinStr. Errors if the str is not ASCII.
+    ///
+    /// Because swapping ascii characters cannot invalidate utf-8, it's completely safe to mutate
+    /// the resulting AinStr without breaking the original str.
+    #[inline]
+    pub const fn from_str_mut(s: &mut str) -> Result<&mut AinStr, AinValidationError> {
+        // SAFETY: because from_ascii_mut validates that the input is all ASCII, and an &mut AinStr
+        // cannot change any character to be non-ascii, this guarantees that the original str will
+        // all be valid utf-8 when the borrow ends.
+        Self::from_ascii_mut(unsafe { s.as_bytes_mut() })
+    }
+
+    /// Convert a byte slice containing ASCII data to an AinStr. Errors if the bytes are not ASCII.
+    #[inline]
+    pub const fn from_ascii(bytes: &[u8]) -> Result<&AinStr, AinValidationError> {
+        match run_ain_validation(bytes) {
+            // SAFETY: we just validated that the bytes are valid.
+            Ok(()) => Ok(unsafe { Self::from_ascii_unchecked(bytes) }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Convert a mutable byte slice containing ASCII data to an AinStr. Errors if the bytes are not
+    /// ASCII.
+    #[inline]
+    pub const fn from_ascii_mut(bytes: &mut [u8]) -> Result<&mut AinStr, AinValidationError> {
+        match run_ain_validation(bytes) {
+            // SAFETY: we just validated that the bytes are valid.
+            Ok(()) => Ok(unsafe { Self::from_ascii_unchecked_mut(bytes) }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Converts a slice of ascii bytes to an `AinStr` without checking for non-ASCII characters.
     ///
     /// # Safety
+    ///
     /// If any of the bytes in `bytes` do not represent valid ascii characters, calling
     /// this function is undefined behavior.
     ///
     /// # Examples
     /// ```
     /// # use ain::AinStr;
-    /// let foo = unsafe { AinStr::from_ascii_unchecked(&b"foo"[..]) };
+    /// let foo = unsafe { AinStr::from_ascii_unchecked(b"foo") };
     /// assert_eq!(foo.as_str(), "foo");
     /// ```
-    #[inline]
     #[must_use]
-    pub unsafe fn from_ascii_unchecked(bytes: &[u8]) -> &AinStr {
-        // SAFETY: Caller guarantees all bytes in `bytes` are valid
-        //         ascii characters.
-        unsafe { bytes.as_ain_str_unchecked() }
+    #[inline]
+    pub const unsafe fn from_ascii_unchecked(bytes: &[u8]) -> &Self {
+        // SAFETY: Caller guarantees all bytes in `bytes` are valid ascii characters.
+        let ascii = unsafe { &*(bytes as *const [u8] as *const [AinChar]) };
+        Self::from_slice(ascii)
     }
 
     /// Converts anything that can be represented as a mutable byte slice to an `AinStr` without
@@ -149,27 +149,74 @@ impl AinStr {
     /// # Examples
     /// ```
     /// # use ain::AinStr;
-    /// let foo = unsafe { AinStr::from_ascii_unchecked_mut(&mut b"foo"[..]) };
+    /// let mut bytes = *b"foo";
+    /// let foo = unsafe { AinStr::from_ascii_unchecked_mut(&mut bytes[..]) };
     /// assert_eq!(foo.as_str(), "foo");
     /// ```
-    #[inline]
     #[must_use]
-    pub unsafe fn from_ascii_unchecked_mut(bytes: &mut [u8]) -> &mut AinStr {
-        // SAFETY: Caller guarantees all bytes in `bytes` are valid
-        //         ascii characters.
-        unsafe { bytes.as_mut_ain_str_unchecked() }
+    #[inline]
+    pub const unsafe fn from_ascii_unchecked_mut(bytes: &mut [u8]) -> &mut Self {
+        // SAFETY: Caller guarantees all bytes in `bytes` are valid ascii characters.
+        let ascii = unsafe { &mut *(bytes as *mut [u8] as *mut [AinChar]) };
+        Self::from_slice_mut(ascii)
+    }
+
+    /// Converts `&self` to a `&str` slice.
+    #[must_use]
+    #[inline]
+    pub const fn as_str(&self) -> &str {
+        // SAFETY: All valid values of `AinChar` are valid ASCII, and therefore utf-8.
+        unsafe { &*(self as *const AinStr as *const str) }
+    }
+
+    /// Converts `&self` into a byte slice.
+    #[must_use]
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8] {
+        // SAFETY: AinChar is a transparent wrapper around repr(u8), therefore it is valid as bytes.
+        unsafe { &*(self as *const AinStr as *const [u8]) }
+    }
+
+    /// Returns the entire string as slice of `AinChar`s.
+    #[must_use]
+    #[inline]
+    pub const fn as_slice(&self) -> &[AinChar] {
+        &self.slice
+    }
+
+    /// Returns the entire string as mutable slice of `AinChar`s.
+    ///
+    /// Since all characters are a single byte, all safe mutations of the slice are safe for AinStr.
+    #[must_use]
+    #[inline]
+    pub const fn as_mut_slice(&mut self) -> &mut [AinChar] {
+        &mut self.slice
+    }
+
+    /// Gets a pointer to the contents of the `AinStr`.
+    #[must_use]
+    #[inline]
+    pub const fn as_ptr(&self) -> *const AinChar {
+        self.as_slice().as_ptr()
+    }
+
+    /// Returns a mutable pointer to the `AinStr`'s contents.
+    #[must_use]
+    #[inline]
+    pub const fn as_mut_ptr(&mut self) -> *mut AinChar {
+        self.as_mut_slice().as_mut_ptr()
     }
 
     /// Returns the number of characters / bytes in this ASCII sequence.
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinStr;
-    /// let s = AinStr::from_ascii("foo").unwrap();
+    /// # use ain::ain;
+    /// let s = ain!("foo");
     /// assert_eq!(s.len(), 3);
     /// ```
-    #[inline]
     #[must_use]
+    #[inline]
     pub const fn len(&self) -> usize {
         self.slice.len()
     }
@@ -178,128 +225,881 @@ impl AinStr {
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinStr;
-    /// let mut empty = AinStr::from_ascii("").unwrap();
-    /// let mut full = AinStr::from_ascii("foo").unwrap();
+    /// # use ain::ain;
+    /// let empty = ain!("");
+    /// let full = ain!("foo");
     /// assert!(empty.is_empty());
     /// assert!(!full.is_empty());
     /// ```
-    #[inline]
     #[must_use]
+    #[inline]
     pub const fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.slice.is_empty()
+    }
+
+    /// Return a single index or subslice of self, without panicking if the index is out of bounds.
+    #[inline]
+    pub fn get<'s, I>(
+        &'s self,
+        idx: I,
+    ) -> Option<&'s <<I as SliceIndex<[AinChar]>>::Output as AinSliceIndexOutputMap>::Output>
+    where
+        I: SliceIndex<[AinChar]>,
+        I::Output: AinSliceIndexOutputMap + 's,
+    {
+        self.as_slice()
+            .get(idx)
+            .map(|res| res.convert_slice_index_output())
+    }
+
+    /// Return a single index or subslice of self, without panicking if the index is out of bounds.
+    #[inline]
+    pub fn get_mut<'s, I>(
+        &'s mut self,
+        idx: I,
+    ) -> Option<&'s mut <<I as SliceIndex<[AinChar]>>::Output as AinSliceIndexOutputMap>::Output>
+    where
+        I: SliceIndex<[AinChar]>,
+        I::Output: AinSliceIndexOutputMap + 's,
+    {
+        self.as_mut_slice()
+            .get_mut(idx)
+            .map(|res| res.convert_slice_index_output_mut())
     }
 
     /// Returns an iterator over the characters of the `AinStr`.
     #[inline]
-    #[must_use]
     pub fn chars(&self) -> Chars<'_> {
-        Chars(self.slice.iter())
+        Chars {
+            inner: self.slice.iter(),
+        }
     }
 
     /// Returns an iterator over the characters of the `AinStr` which allows you to modify the
     /// value of each `AinChar`.
     #[inline]
-    #[must_use]
     pub fn chars_mut(&mut self) -> CharsMut<'_> {
-        CharsMut(self.slice.iter_mut())
+        CharsMut {
+            inner: self.slice.iter_mut(),
+        }
     }
 
-    /// Returns an iterator over parts of the `AinStr` separated by a character.
+    /// Find the index of the start of the first match of the given pattern in this `&AinStr`.
+    ///
+    /// [`AinChar`] and [`&AinStr`][AinStr] based patterns match case-insensitive.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// assert_eq!(ain!("Aa").find(ain!('a')), Some(0))
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn find<P: Pattern>(&self, pattern: P) -> Option<usize> {
+        SearchHolder::new(pattern, self).find_impl()
+    }
+
+    /// Find the index of the start of the last match of the given pattern in this `&AinStr`.
+    ///
+    /// [`AinChar`] and [`&AinStr`][AinStr] based patterns match case-insensitive.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// assert_eq!(ain!("Aa").rfind(ain!('A')), Some(1))
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn rfind<P: Pattern>(&self, pattern: P) -> Option<usize> {
+        SearchHolder::new(pattern, self).rfind_impl()
+    }
+
+    /// Returns true if this AinStr contains a match of the pattern.
+    ///
+    /// [`AinChar`] and [`&AinStr`][AinStr] based patterns match case-insensitive.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// assert_eq!(ain!("bAaB").contains(ain!('a')), true)
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn contains<P: Pattern>(&self, pattern: P) -> bool {
+        self.find(pattern).is_some()
+    }
+
+    /// Split this string slice at the given index.
+    #[must_use]
+    #[inline]
+    pub const fn split_at(&self, idx: usize) -> (&Self, &Self) {
+        let (l, r) = self.slice.split_at(idx);
+        (Self::from_slice(l), Self::from_slice(r))
+    }
+
+    /// Split this string slice at the given index.
+    #[must_use]
+    #[inline]
+    pub const fn split_at_mut(&mut self, idx: usize) -> (&mut Self, &mut Self) {
+        let (l, r) = self.slice.split_at_mut(idx);
+        (Self::from_slice_mut(l), Self::from_slice_mut(r))
+    }
+
+    /// Returns an iterator over parts of the `AinStr` separated by a pattern.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
     ///
     /// # Examples
     /// ```
-    /// # use ain::{AinStr, AinChar};
-    /// let words = AinStr::from_ascii("apple banana lemon").unwrap()
-    ///     .split(AinChar::Space)
+    /// # use ain::ain;
+    /// let words = ain!("apple banana lemon")
+    ///     .split(ain!(' '))
     ///     .map(|a| a.as_str())
     ///     .collect::<Vec<_>>();
     /// assert_eq!(words, ["apple", "banana", "lemon"]);
+    ///
+    /// let segments = ain!("aaaabaaaBaa")
+    ///     .split(ain!('b')) // matches both `b` and `B`
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, ["aaaa", "aaa", "aa"]);
+    ///
+    /// let split_by_str = ain!("abcdabefAbghiaBjab")
+    ///     .split(ain!("AB"))
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split_by_str, ["", "cd", "ef", "ghi", "j", ""]);
+    ///
+    /// let split_by_slice = ain!("Abc:def;ghi.jkl")
+    ///     .split(&[ain!(':'), ain!(';'), ain!('.')])
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split_by_slice, ["Abc", "def", "ghi", "jkl"]);
     /// ```
-    #[must_use]
-    pub fn split(&self, on: AinChar) -> impl DoubleEndedIterator<Item = &AinStr> {
-        Split {
-            on,
-            ended: false,
-            chars: self.chars(),
-        }
+    ///
+    /// Splitting on the empty string produces matches before and after every character, including
+    /// empty strings at the start and end:
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let split = ain!("ain")
+    ///     .split(ain!(""))
+    ///     .map(|c| c.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split, ["", "a", "i", "n", ""]);
+    ///
+    /// let split = ain!("")
+    ///     .split(ain!(""))
+    ///     .map(|c| c.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split, ["", ""]);
+    /// ```
+    #[inline]
+    pub fn split<P: Pattern>(&self, on: P) -> Split<'_, P> {
+        Split::new(self, on)
+    }
+
+    /// Returns an iterator over mutable parts of the `AinStr` separated by a pattern.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(words, "apple banana lemon");
+    /// let words = words.split_mut(ain!(' '))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, &["Xpple", "Xanana", "Xemon"]);
+    ///
+    /// ain_mut!(segments, "aaaabaaaBaa");
+    /// let segments = segments.split_mut(ain!('b'))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, &["Xaaa", "Xaa", "Xa"]);
+    /// ```
+    #[inline]
+    pub fn split_mut<P: Pattern>(&mut self, on: P) -> SplitMut<'_, P> {
+        SplitMut::new(self, on)
+    }
+
+    /// Returns an iterator over parts of the `AinStr` separated by a pattern, starting from the
+    /// back.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::ain;
+    ///
+    /// let words = ain!("apple banana lemon")
+    ///     .rsplit(ain!(' '))
+    ///     .map(|a| a.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, ["lemon", "banana", "apple"]);
+    ///
+    /// let segments = ain!("aaaabaaaBaa")
+    ///     .rsplit(ain!('b')) // matches both `b` and `B`
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, ["aa", "aaa", "aaaa"]);
+    ///
+    /// let split_by_str = ain!("abcdabefAbghiaBjab")
+    ///     .rsplit(ain!("AB"))
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split_by_str, ["", "j", "ghi", "ef", "cd", ""]);
+    ///
+    /// let split_by_slice = ain!("Abc:def;ghi.jkl")
+    ///     .rsplit(&[ain!(':'), ain!(';'), ain!('.')])
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split_by_slice, ["jkl", "ghi", "def", "Abc"]);
+    /// ```
+    ///
+    /// Splitting on the empty string produces matches before and after every character, including
+    /// empty strings at the start and end:
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let split = ain!("ain")
+    ///     .rsplit(ain!(""))
+    ///     .map(|c| c.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split, ["", "n", "i", "a", ""]);
+    ///
+    /// let split = ain!("")
+    ///     .rsplit(ain!(""))
+    ///     .map(|c| c.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split, ["", ""]);
+    /// ```
+    #[inline]
+    pub fn rsplit<P: Pattern>(&self, on: P) -> RSplit<'_, P> {
+        RSplit::new(self, on)
+    }
+
+    /// Returns an iterator over mutable parts of the `AinStr` separated by a pattern.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(words, "apple banana lemon");
+    /// let words = words.rsplit_mut(ain!(' '))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, &["Xemon", "Xanana", "Xpple"]);
+    ///
+    /// ain_mut!(segments, "aaaabaaaBaa");
+    /// let segments = segments.rsplit_mut(ain!('b'))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, &["Xa", "Xaa", "Xaaa"]);
+    /// ```
+    #[inline]
+    pub fn rsplit_mut<P: Pattern>(&mut self, on: P) -> RSplitMut<'_, P> {
+        RSplitMut::new(self, on)
+    }
+
+    /// Returns an iterator over parts of the `AinStr` separated by a pattern, returning at most `n`
+    /// items.
+    ///
+    /// If `n` substrings are returned, the last substring (the `n`th substring) will contain the
+    /// remainder of the string.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::ain;
+    /// let words = ain!("apple banana lemon")
+    ///     .splitn(2, ain!(' '))
+    ///     .map(|a| a.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, ["apple", "banana lemon"]);
+    ///
+    /// let segments = ain!("aaaabaaaBaa")
+    ///     .splitn(2, ain!('b')) // matches both `b` and `B`
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, ["aaaa", "aaaBaa"]);
+    ///
+    /// let split_by_str = ain!("abcdabefAbghiaBjab")
+    ///     .splitn(4, ain!("AB"))
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(split_by_str, ["", "cd", "ef", "ghiaBjab"]);
+    /// ```
+    #[inline]
+    pub fn splitn<P: Pattern>(&self, n: usize, on: P) -> SplitN<'_, P> {
+        SplitN::new(self, n, on)
+    }
+
+    /// Returns an iterator over mutable parts of the `AinStr` separated by a pattern, returning at
+    /// most `n` items.
+    ///
+    /// If `n` substrings are returned, the last substring (the `n`th substring) will contain the
+    /// remainder of the string.
+    ///
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(words, "apple banana lemon");
+    /// let words = words.splitn_mut(2, ain!(' '))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, &["Xpple", "Xanana lemon"]);
+    ///
+    /// ain_mut!(segments, "aaaabaaaBaa");
+    /// let segments = segments.splitn_mut(2, ain!('b'))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, &["Xaaa", "XaaBaa"]);
+    /// ```
+    #[inline]
+    pub fn splitn_mut<P: Pattern>(&mut self, n: usize, on: P) -> SplitNMut<'_, P> {
+        SplitNMut::new(self, n, on)
+    }
+
+    /// Returns an iterator over parts of the `AinStr` separated by a pattern, returning at most `n`
+    /// items, starting from the end.
+    ///
+    /// If `n` substrings are returned, the last substring (the `n`th substring) will contain the
+    /// remainder of the string.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::ain;
+    ///
+    /// let words = ain!("apple banana lemon")
+    ///     .rsplitn(2, ain!(' '))
+    ///     .map(|a| a.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, ["lemon", "apple banana"]);
+    ///
+    /// let segments = ain!("aaaabaaaBaa")
+    ///     .rsplitn(2, ain!('b')) // matches both `b` and `B`
+    ///     .map(|s| s.as_str())
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, ["aa", "aaaabaaa"]);
+    /// ```
+    #[inline]
+    pub fn rsplitn<P: Pattern>(&self, n: usize, on: P) -> RSplitN<'_, P> {
+        RSplitN::new(self, n, on)
+    }
+
+    /// Returns an iterator over mutable parts of the `AinStr` separated by a pattern, returning at
+    /// most `n` items, starting from the end.
+    ///
+    /// If `n` substrings are returned, the last substring (the `n`th substring) will contain the
+    /// remainder of the string.
+    ///
+    /// If the split pattern appears multiple times in a row, it will produce empty strings in
+    /// between copies of the separator.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(words, "apple banana lemon");
+    /// let words = words.rsplitn_mut(2, ain!(' '))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(words, &["Xemon", "Xpple banana"]);
+    ///
+    /// ain_mut!(segments, "aaaabaaaBaa");
+    /// let segments = segments.rsplitn_mut(2, ain!('b'))
+    ///     .map(|word| {
+    ///         word[0] = ain!('X');
+    ///         word.as_str()
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(segments, &["Xa", "Xaaabaaa"]);
+    /// ```
+    #[inline]
+    pub fn rsplitn_mut<P: Pattern>(&mut self, n: usize, on: P) -> RSplitNMut<'_, P> {
+        RSplitNMut::new(self, n, on)
     }
 
     /// Returns an iterator over the lines of the `AinStr`, which are themselves `AinStr`s.
     ///
     /// Lines are ended with either `LineFeed` (`\n`), or `CarriageReturn` then `LineFeed` (`\r\n`).
     ///
-    /// The final line ending is optional.
+    /// The final line ending is optional. A string that ends with a final line ending will return
+    /// the same lines as an otherwise identical string without a final line ending.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let str = ain!("Some text with\nMixed Line Endings\r\nAnd Trailing Line Ending\n");
+    /// let lines = str.lines().collect::<Vec<_>>();
+    /// assert_eq!(
+    ///     lines,
+    ///     &[
+    ///         ain!("Some text with"),
+    ///         ain!("Mixed line endings"),
+    ///         ain!("and trailing line ending"),
+    ///     ],
+    /// );
+    ///
+    /// let str = ain!("");
+    /// let lines = str.lines().collect::<Vec<_>>();
+    /// assert!(lines.is_empty());
+    /// ```
     #[inline]
-    #[must_use]
-    pub fn lines(&self) -> impl DoubleEndedIterator<Item = &AinStr> {
-        Lines { string: self }
+    pub fn lines(&self) -> Lines<'_> {
+        Lines::new(self)
+    }
+
+    /// Returns an iterator over mutable lines of the `AinStr`, which are themselves `AinStr`s.
+    ///
+    /// Lines are ended with either `LineFeed` (`\n`), or `CarriageReturn` then `LineFeed` (`\r\n`).
+    ///
+    /// The final line ending is optional. A string that ends with a final line ending will return
+    /// the same lines as an otherwise identical string without a final line ending.
+    ///
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(str, "Some text with\nMixed Line Endings\r\nAnd Trailing Line Ending\n");
+    /// let lines = str.lines_mut()
+    ///     .map(|line| {
+    ///         line[0] = ain!('X');
+    ///         &*line
+    ///     })
+    ///     .collect::<Vec<_>>();
+    /// assert_eq!(
+    ///     lines,
+    ///     &[
+    ///         ain!("Xome text with"),
+    ///         ain!("xixed line endings"),
+    ///         ain!("xnd trailing line ending"),
+    ///     ],
+    /// );
+    ///
+    /// ain_mut!(str, "");
+    /// let lines = str.lines_mut().collect::<Vec<_>>();
+    /// assert!(lines.is_empty());
+    /// ```
+    #[inline]
+    pub fn lines_mut(&mut self) -> LinesMut<'_> {
+        LinesMut::new(self)
     }
 
     /// Returns an ASCII string slice with leading and trailing whitespace removed.
     ///
+    /// Note: This uses [AinChar::is_whitespace], which excludes Vertical Tab.
+    ///
     /// # Examples
     /// ```
-    /// # use ain::AinStr;
-    /// let example = AinStr::from_ascii("  \twhite \tspace  \t").unwrap();
-    /// assert_eq!("white \tspace", example.trim());
+    /// # use ain::ain;
+    /// let example = ain!("  \twhite \tspace  \t");
+    /// assert_eq!(example.trim().as_str(), "white \tspace");
     /// ```
     #[must_use]
-    pub fn trim(&self) -> &Self {
+    #[inline]
+    pub const fn trim(&self) -> &Self {
         self.trim_start().trim_end()
     }
 
     /// Returns an ASCII string slice with leading whitespace removed.
     ///
+    /// Note: This uses [AinChar::is_whitespace], which excludes Vertical Tab.
+    ///
     /// # Examples
     /// ```
-    /// # use ain::AinStr;
-    /// let example = AinStr::from_ascii("  \twhite \tspace  \t").unwrap();
-    /// assert_eq!("white \tspace  \t", example.trim_start());
+    /// # use ain::ain;
+    /// let example = ain!("  \twhite \tspace  \t");
+    /// assert_eq!(example.trim_start().as_str(), "white \tspace  \t");
     /// ```
     #[must_use]
-    pub fn trim_start(&self) -> &Self {
-        let whitespace_len = self
-            .chars()
-            .position(|ch| !ch.is_whitespace())
-            .unwrap_or_else(|| self.len());
-
-        // SAFETY: `whitespace_len` is `0..=len`, which is at most `len`, which is a valid empty slice.
-        unsafe { self.as_slice().get_unchecked(whitespace_len..).into() }
+    #[inline]
+    pub const fn trim_start(&self) -> &Self {
+        let mut chars = self.as_slice();
+        // Note: A pattern matching based approach (instead of indexing) allows making the function
+        // const.
+        while let [first, rest @ ..] = chars {
+            if first.is_whitespace() {
+                chars = rest;
+            } else {
+                break;
+            }
+        }
+        Self::from_slice(chars)
     }
 
     /// Returns an ASCII string slice with trailing whitespace removed.
     ///
+    /// Note: This uses [AinChar::is_whitespace], which excludes Vertical Tab.
+    ///
     /// # Examples
     /// ```
-    /// # use ain::AinStr;
-    /// let example = AinStr::from_ascii("  \twhite \tspace  \t").unwrap();
-    /// assert_eq!("  \twhite \tspace", example.trim_end());
+    /// # use ain::ain;
+    /// let example = ain!("  \twhite \tspace  \t");
+    /// assert_eq!(example.trim_end().as_str(), "  \twhite \tspace");
     /// ```
     #[must_use]
-    pub fn trim_end(&self) -> &Self {
-        // Number of whitespace characters counting from the end
-        let whitespace_len = self
-            .chars()
-            .rev()
-            .position(|ch| !ch.is_whitespace())
-            .unwrap_or_else(|| self.len());
-
-        // SAFETY: `whitespace_len` is `0..=len`, which is at most `len`, which is a valid empty slice, and at least `0`, which is the whole slice.
-        unsafe {
-            self.as_slice()
-                .get_unchecked(..self.len() - whitespace_len)
-                .into()
+    #[inline]
+    pub const fn trim_end(&self) -> &Self {
+        let mut chars = self.as_slice();
+        // Note: A pattern matching based approach (instead of indexing) allows making the function
+        // const.
+        while let [rest @ .., last] = chars {
+            if last.is_whitespace() {
+                chars = rest;
+            } else {
+                break;
+            }
         }
+        Self::from_slice(chars)
+    }
+
+    /// If the given pattern exists at the start of self, returns self with one copy of the pattern
+    /// removed, otherwise returns none.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbb").strip_prefix(ain!('a'));
+    /// assert_eq!(s, Some(ain!("aabbb")));
+    ///
+    /// let s = ain!("aaabbb").strip_prefix(ain!('c'));
+    /// assert_eq!(s, None);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn strip_prefix<P: Pattern>(&self, mut pattern: P) -> Option<&Self> {
+        match pattern.start_match_split_point(self) {
+            Some(prefix_end) => Some(&self[prefix_end..]),
+            None => None,
+        }
+    }
+
+    /// If the given pattern exists at the start of self, returns self with one copy of the pattern
+    /// removed, otherwise returns none, using a mutable reference.
+    ///
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.strip_prefix_mut(ain!('a'));
+    /// assert_eq!(s.as_deref(), Some(ain!("aabbb")));
+    ///
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.strip_prefix_mut(ain!('c'));
+    /// assert_eq!(s, None);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn strip_prefix_mut<P: Pattern>(&mut self, mut pattern: P) -> Option<&mut Self> {
+        match pattern.start_match_split_point(self) {
+            Some(prefix_end) => Some(&mut self[prefix_end..]),
+            None => None,
+        }
+    }
+
+    /// Removes one copy of the given pattern from the start of self if it is present, otherwise
+    /// returns self unchanged.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbb").trim_prefix(ain!('a'));
+    /// assert_eq!(s, ain!("aabbb"));
+    ///
+    /// let s = ain!("aaabbb").trim_prefix(ain!('c'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_prefix<P: Pattern>(&self, pattern: P) -> &Self {
+        self.strip_prefix(pattern).unwrap_or(self)
+    }
+
+    /// Removes one copy of the given pattern from the start of self if it is present, otherwise
+    /// returns self unchanged, using a mutable reference.
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_prefix_mut(ain!('a'));
+    /// assert_eq!(s, ain!("aabbb"));
+    ///
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_prefix_mut(ain!('c'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_prefix_mut<P: Pattern>(&mut self, mut pattern: P) -> &mut Self {
+        match pattern.start_match_split_point(self) {
+            Some(prefix_end) => &mut self[prefix_end..],
+            None => self,
+        }
+    }
+
+    /// Removes all matches of the given pattern from the start of self.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbb").trim_start_matches(ain!('a'));
+    /// assert_eq!(s, ain!("bbb"));
+    ///
+    /// let s = ain!("aaabbb").trim_start_matches(ain!('b'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    ///
+    /// let s = ain!("aaabbb").trim_start_matches(ain!("aa"));
+    /// assert_eq!(s, ain!("abbb"));
+    ///
+    /// let s = ain!("aaaaaa").trim_start_matches(ain!('a'));
+    /// assert_eq!(s, ain!(""));
+    ///
+    /// let s = ain!("aaaaaa").trim_start_matches(ain!(""));
+    /// assert_eq!(s, ain!("aaaaaa"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_start_matches<P: Pattern>(&self, mut pattern: P) -> &Self {
+        let start_matches_end = pattern.start_matches_split_point(self);
+        &self[start_matches_end..]
+    }
+
+    /// Removes all matches of the given pattern from the start of self, keeping self mutable.
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_start_matches_mut(ain!('a'));
+    /// assert_eq!(s, ain!("bbb"));
+    ///
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_start_matches_mut(ain!('b'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    ///
+    /// ain_mut!(s, "aaaaaa");
+    /// let s = s.trim_start_matches_mut(ain!('a'));
+    /// assert_eq!(s, ain!(""));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_start_matches_mut<P: Pattern>(&mut self, mut pattern: P) -> &mut Self {
+        let start_matches_end = pattern.start_matches_split_point(self);
+        &mut self[start_matches_end..]
+    }
+
+    /// If the given pattern exists on the end of self, returns self with one copy of the pattern
+    /// removed, otherwise returns none.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbb").strip_suffix(ain!('b'));
+    /// assert_eq!(s, Some(ain!("aaabb")));
+    ///
+    /// let s = ain!("aaabbb").strip_suffix(ain!('c'));
+    /// assert_eq!(s, None);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn strip_suffix<P: Pattern>(&self, mut pattern: P) -> Option<&Self> {
+        match pattern.end_match_split_point(self) {
+            Some(suffix_start) => Some(&self[..suffix_start]),
+            None => None,
+        }
+    }
+
+    /// If the given pattern exists on the end of self, returns self with one copy of the pattern
+    /// removed, otherwise returns none, using a mutable reference.
+    ///
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.strip_suffix_mut(ain!('b'));
+    /// assert_eq!(s.as_deref(), Some(ain!("aaabb")));
+    ///
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.strip_suffix_mut(ain!('c'));
+    /// assert_eq!(s, None);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn strip_suffix_mut<P: Pattern>(&mut self, mut pattern: P) -> Option<&mut Self> {
+        match pattern.end_match_split_point(self) {
+            Some(suffix_start) => Some(&mut self[..suffix_start]),
+            None => None,
+        }
+    }
+
+    /// Removes one copy of the given pattern from the end of self if it is present, otherwise
+    /// returns self unchanged.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbb").trim_suffix(ain!('b'));
+    /// assert_eq!(s, ain!("aaabb"));
+    ///
+    /// let s = ain!("aaabbb").trim_suffix(ain!('c'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_suffix<P: Pattern>(&self, pattern: P) -> &Self {
+        self.strip_suffix(pattern).unwrap_or(self)
+    }
+
+    /// Removes one copy of the given pattern from the end of self if it is present, otherwise
+    /// returns self unchanged, using a mutable reference.
+    ///
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_suffix_mut(ain!('b'));
+    /// assert_eq!(s, ain!("aaabb"));
+    ///
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_suffix_mut(ain!('c'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_suffix_mut<P: Pattern>(&mut self, mut pattern: P) -> &mut Self {
+        match pattern.end_match_split_point(self) {
+            Some(suffix_start) => &mut self[..suffix_start],
+            None => self,
+        }
+    }
+
+    /// Removes all matches of the given pattern from the end of self.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbb").trim_end_matches(ain!('b'));
+    /// assert_eq!(s, ain!("aaa"));
+    ///
+    /// let s = ain!("aaabbb").trim_end_matches(ain!('a'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    ///
+    /// let s = ain!("aaabbb").trim_end_matches(ain!("bb"));
+    /// assert_eq!(s, ain!("aaab"));
+    ///
+    /// let s = ain!("aaaaaa").trim_end_matches(ain!('A'));
+    /// assert_eq!(s, ain!(""));
+    ///
+    /// let s = ain!("aaaaaa").trim_end_matches(ain!(""));
+    /// assert_eq!(s, ain!("aaaaaa"));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_end_matches<P: Pattern>(&self, mut pattern: P) -> &Self {
+        let end_matches_start = pattern.end_matches_split_point(self);
+        &self[..end_matches_start]
+    }
+
+    /// Removes all matches of the given pattern from the start of self, keeping self mutable.
+    ///
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_end_matches_mut(ain!('b'));
+    /// assert_eq!(s, ain!("aaa"));
+    ///
+    /// ain_mut!(s, "aaabbb");
+    /// let s = s.trim_end_matches_mut(ain!('a'));
+    /// assert_eq!(s, ain!("aaabbb"));
+    ///
+    /// ain_mut!(s, "aaaAaA");
+    /// let s = s.trim_end_matches_mut(ain!('A'));
+    /// assert_eq!(s, ain!(""));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_end_matches_mut<P: Pattern>(&mut self, mut pattern: P) -> &mut Self {
+        let end_matches_start = pattern.end_matches_split_point(self);
+        &mut self[..end_matches_start]
+    }
+
+    /// Removes all matches of the given pattern from both ends of self.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// let s = ain!("aaabbbaaa").trim_matches(ain!('a'));
+    /// assert_eq!(s, ain!("bbb"));
+    ///
+    /// let s = ain!("aaabbbaaa").trim_matches(ain!('b'));
+    /// assert_eq!(s, ain!("aaabbbaaa"));
+    ///
+    /// let s = ain!("aaaaaa").trim_matches(ain!('A'));
+    /// assert_eq!(s, ain!(""));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_matches<P: DoubleEndedPattern>(&self, mut pattern: P) -> &Self {
+        let start_split = pattern.start_matches_split_point(self);
+        let start_trimmed = &self[start_split..];
+        let end_split = pattern.end_matches_split_point(start_trimmed);
+        &start_trimmed[..end_split]
+    }
+
+    /// Removes all matches of the given pattern from both ends of self.
+    ///
+    /// ```
+    /// # use ain::{ain, ain_mut};
+    /// ain_mut!(s, "aaabbbaaa");
+    /// let s = s.trim_matches_mut(ain!('a'));
+    /// assert_eq!(s, ain!("bbb"));
+    ///
+    /// ain_mut!(s, "aaabbbaaa");
+    /// let s = s.trim_matches_mut(ain!('b'));
+    /// assert_eq!(s, ain!("aaabbbaaa"));
+    ///
+    /// ain_mut!(s, "AaAAaA");
+    /// let s = s.trim_matches_mut(ain!('a'));
+    /// assert_eq!(s, ain!(""));
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn trim_matches_mut<P: DoubleEndedPattern>(&mut self, mut pattern: P) -> &mut Self {
+        let start_split = pattern.start_matches_split_point(self);
+        let start_trimmed = &mut self[start_split..];
+        let end_split = pattern.end_matches_split_point(start_trimmed);
+        &mut start_trimmed[..end_split]
     }
 
     /// Replaces lowercase letters with their uppercase equivalent.
     ///
     /// Since the string is case insensitive, this does not change the equality comparions or hash
     /// of the string.
-    pub fn make_uppercase(&mut self) {
-        for ch in self.chars_mut() {
-            ch.make_uppercase()
+    #[inline]
+    pub const fn make_uppercase(&mut self) {
+        let mut chars = self.as_mut_slice();
+        // For loops are not const yet, so we either need to use an index loop or this
+        // pattern-matching hack.
+        while let [first, rest @ ..] = chars {
+            first.make_uppercase();
+            chars = rest;
         }
     }
 
@@ -307,138 +1107,303 @@ impl AinStr {
     ///
     /// Since the string is case insensitive, this does not change the equality comparions or hash
     /// of the string.
-    pub fn make_lowercase(&mut self) {
-        for ch in self.chars_mut() {
-            ch.make_lowercase()
+    #[inline]
+    pub const fn make_lowercase(&mut self) {
+        let mut chars = self.as_mut_slice();
+        // For loops are not const yet, so we either need to use an index loop or this
+        // pattern-matching hack.
+        while let [first, rest @ ..] = chars {
+            first.make_lowercase();
+            chars = rest;
         }
     }
 
-    /// Returns a copy of this string where letters 'a' to 'z' are mapped to 'A' to 'Z'.
-    #[cfg(feature = "alloc")]
-    #[must_use]
-    pub fn to_uppercase(&self) -> AinString {
-        let mut ascii_string = self.to_ain_string();
-        ascii_string.make_uppercase();
-        ascii_string
-    }
-
-    /// Returns a copy of this string where letters 'A' to 'Z' are mapped to 'a' to 'z'.
-    #[cfg(feature = "alloc")]
-    #[must_use]
-    pub fn to_lowercase(&self) -> AinString {
-        let mut ascii_string = self.to_ain_string();
-        ascii_string.make_lowercase();
-        ascii_string
-    }
-
     /// Returns the first character if the string is not empty.
-    #[inline]
     #[must_use]
-    pub fn first(&self) -> Option<AinChar> {
+    #[inline]
+    pub const fn first(&self) -> Option<AinChar> {
         self.slice.first().copied()
     }
 
     /// Returns the last character if the string is not empty.
-    #[inline]
     #[must_use]
-    pub fn last(&self) -> Option<AinChar> {
+    #[inline]
+    pub const fn last(&self) -> Option<AinChar> {
         self.slice.last().copied()
     }
+}
 
-    /// Converts a [`Box<AinStr>`] into a [`AinString`] without copying or allocating.
-    #[cfg(feature = "alloc")]
+impl fmt::Debug for AinStr {
     #[inline]
-    #[must_use]
-    pub fn into_ain_string(self: Box<Self>) -> AinString {
-        let slice = Box::<[AinChar]>::from(self);
-        AinString::from(slice.into_vec())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl fmt::Display for AinStr {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+impl Hash for AinStr {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        // Just delegate to the slice. This is identical to the derived hash impl, but makes clippy
+        // happy because we override PartialEq.
+        self.slice.hash(state)
+    }
+}
+
+impl PartialEq for AinStr {
+    #[inline]
+    fn eq(&self, other: &AinStr) -> bool {
+        self.as_bytes().eq_ignore_ascii_case(other.as_bytes())
+    }
+}
+
+impl PartialEq<&mut AinStr> for AinStr {
+    #[inline]
+    fn eq(&self, other: &&mut AinStr) -> bool {
+        PartialEq::eq(self, *other)
+    }
+}
+
+impl PartialEq<&AinStr> for AinStr {
+    #[inline]
+    fn eq(&self, other: &&AinStr) -> bool {
+        PartialEq::eq(self, *other)
+    }
+}
+
+impl PartialEq<AinStr> for &AinStr {
+    #[inline]
+    fn eq(&self, other: &AinStr) -> bool {
+        PartialEq::eq(*self, other)
+    }
+}
+
+impl PartialEq<AinStr> for &mut AinStr {
+    #[inline]
+    fn eq(&self, other: &AinStr) -> bool {
+        PartialEq::eq(*self, other)
     }
 }
 
 impl PartialEq<[AinChar]> for AinStr {
     #[inline]
     fn eq(&self, other: &[AinChar]) -> bool {
-        <AinStr as AsRef<[AinChar]>>::as_ref(self) == other
+        PartialEq::eq(self, AinStr::from_slice(other))
     }
 }
+
 impl PartialEq<AinStr> for [AinChar] {
     #[inline]
     fn eq(&self, other: &AinStr) -> bool {
-        self == <AinStr as AsRef<[AinChar]>>::as_ref(other)
+        PartialEq::eq(AinStr::from_slice(self), other)
     }
 }
 
-#[cfg(feature = "alloc")]
-impl ToOwned for AinStr {
-    type Owned = AinString;
-
+impl<const N: usize> PartialEq<[AinChar; N]> for AinStr {
     #[inline]
-    fn to_owned(&self) -> AinString {
-        self.to_ain_string()
+    fn eq(&self, other: &[AinChar; N]) -> bool {
+        PartialEq::eq(self, AinStr::from_slice(other))
     }
 }
 
-impl AsRef<[u8]> for AinStr {
+impl<const N: usize> PartialEq<AinStr> for [AinChar; N] {
     #[inline]
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-impl AsRef<str> for AinStr {
-    #[inline]
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-impl AsRef<[AinChar]> for AinStr {
-    #[inline]
-    fn as_ref(&self) -> &[AinChar] {
-        &self.slice
-    }
-}
-impl AsMut<[AinChar]> for AinStr {
-    #[inline]
-    fn as_mut(&mut self) -> &mut [AinChar] {
-        &mut self.slice
+    fn eq(&self, other: &AinStr) -> bool {
+        PartialEq::eq(AinStr::from_slice(self), other)
     }
 }
 
-impl Default for &'static AinStr {
+impl PartialOrd for AinStr {
     #[inline]
-    fn default() -> &'static AinStr {
-        From::from(&[] as &[AinChar])
-    }
-}
-impl<'a> From<&'a [AinChar]> for &'a AinStr {
-    #[inline]
-    fn from(slice: &[AinChar]) -> &AinStr {
-        let ptr = slice as *const [AinChar] as *const AinStr;
-        unsafe { &*ptr }
-    }
-}
-impl<'a> From<&'a mut [AinChar]> for &'a mut AinStr {
-    #[inline]
-    fn from(slice: &mut [AinChar]) -> &mut AinStr {
-        let ptr = slice as *mut [AinChar] as *mut AinStr;
-        unsafe { &mut *ptr }
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(Ord::cmp(self, other))
     }
 }
 
-#[cfg(feature = "alloc")]
-impl From<Box<[AinChar]>> for Box<AinStr> {
+impl Ord for AinStr {
     #[inline]
-    fn from(owned: Box<[AinChar]>) -> Box<AinStr> {
-        let ptr = Box::into_raw(owned) as *mut AinStr;
-        unsafe { Box::from_raw(ptr) }
+    fn cmp(&self, other: &Self) -> Ordering {
+        // This implementation is based on the standard library handling of eq_ignore_ascii_case,
+        // adapted for ord handling.
+        #[cfg(any(
+            all(target_arch = "x86_64", target_feature = "sse2"),
+            all(target_arch = "aarch64", target_feature = "neon"),
+        ))]
+        {
+            const CHUNK_SIZE: usize = 16;
+            if self.len() >= CHUNK_SIZE && other.len() >= CHUNK_SIZE {
+                return cmp_to_uppercase_chunks::<CHUNK_SIZE>(self.as_slice(), other.as_slice());
+            }
+        }
+
+        // For the slow path, we can just compare slices, which uses the Ord defined on AinChar.
+        <[AinChar]>::cmp(self.as_slice(), other.as_slice())
     }
 }
 
-#[cfg(feature = "alloc")]
-impl From<Box<[AsciiChar]>> for Box<AinStr> {
+/// Optimized version of Ord for AinStr to process chunks at a time.
+///
+/// Platforms that have SIMD instructions may benefit from this over a naive slice check.
+///
+/// # Invariants
+///
+/// The caller must guarantee that both slices are at least `CHUNK_SIZE` len.
+#[inline]
+fn cmp_to_uppercase_chunks<const CHUNK_SIZE: usize>(lhs: &[AinChar], rhs: &[AinChar]) -> Ordering {
+    let overlap = lhs.len().min(rhs.len());
+    let lhs_overlap = &lhs[..overlap];
+    let rhs_overlap = &rhs[..overlap];
+    // We only chunk up the overlapping portion of the two inputs. Rem is only used to find out the
+    // len of the tail of the overlapping portion, so that we can step back and handle that as a
+    // single chunk. We'll only worry about non-overlapping portions if the overlapping portions are
+    // identical.
+    let (lhs_chunks, lhs_rem) = lhs_overlap.as_chunks::<CHUNK_SIZE>();
+    let (rhs_chunks, rhs_rem) = rhs_overlap.as_chunks::<CHUNK_SIZE>();
+
+    // We copy this from the std lib eq_ignor_ascii_case_chunks to avoid going through the whole
+    // eq_ignore_ascii_case chunking machinery to get to just this part.
+    #[inline(always)]
+    fn eq_ignore_ascii_case_inner<const L: usize>(lhs: &[AinChar; L], rhs: &[AinChar; L]) -> bool {
+        // Branchless check to encourage auto-vectorization
+        let mut equal_ascii = true;
+        let mut j = 0;
+        while j < L {
+            equal_ascii &= lhs[j] == rhs[j];
+            j += 1;
+        }
+        equal_ascii
+    }
+
+    for (lhs_chunk, rhs_chunk) in lhs_chunks.iter().zip(rhs_chunks) {
+        if !eq_ignore_ascii_case_inner(lhs_chunk, rhs_chunk) {
+            // If we've found a block with a difference, we do a branching linear scan to find out
+            // where it is, by falling back to the implementation of cmp for the array type.
+            return <[AinChar; CHUNK_SIZE]>::cmp(lhs_chunk, rhs_chunk);
+        }
+    }
+
+    // If there are no differences so far and the overlapping portion has a non-chunk-sized tail,
+    // get a chunk from tail of the overlapping portion and do a vectorized comparison on that.
+    if !lhs_rem.is_empty() {
+        // Since both lhs_overlap and rhs_overlap are the same len and both are longer than
+        // CHUNK_SIZE, this if let will always match.
+        if let (Some(lhs_tail), Some(rhs_tail)) = (
+            lhs_overlap.last_chunk::<CHUNK_SIZE>(),
+            rhs_overlap.last_chunk::<CHUNK_SIZE>(),
+        ) && !eq_ignore_ascii_case_inner(lhs_tail, rhs_tail)
+        {
+            // There was a mismatch within the tail portion of the overlapping section of the
+            // two slices, so check the tails to find the mismatch position.
+            //
+            // Note that we go back to using lhs_rem and rhs_rem here, because after the check
+            // in the main chunks loop, we already know that the prefix of the tails is equal,
+            // so we only need to check the actual rem portion. The _tail portions were just so
+            // we could vectorize this last eq_ignor_ascii_case_inner check.
+            return <[AinChar]>::cmp(lhs_rem, rhs_rem);
+        }
+    }
+
+    // The overlapping portions of the two slices are identical, so now we just compare by len.
+    lhs.len().cmp(&rhs.len())
+}
+
+impl PartialOrd<[AinChar]> for AinStr {
     #[inline]
-    fn from(owned: Box<[AsciiChar]>) -> Box<AinStr> {
-        let ptr = Box::into_raw(owned) as *mut AinStr;
-        unsafe { Box::from_raw(ptr) }
+    fn partial_cmp(&self, other: &[AinChar]) -> Option<Ordering> {
+        PartialOrd::partial_cmp(self, AinStr::from_slice(other))
+    }
+}
+
+impl PartialOrd<AinStr> for [AinChar] {
+    #[inline]
+    fn partial_cmp(&self, other: &AinStr) -> Option<Ordering> {
+        PartialOrd::partial_cmp(AinStr::from_slice(self), other)
+    }
+}
+
+impl<const N: usize> PartialOrd<[AinChar; N]> for AinStr {
+    #[inline]
+    fn partial_cmp(&self, other: &[AinChar; N]) -> Option<Ordering> {
+        PartialOrd::partial_cmp(self, AinStr::from_slice(other))
+    }
+}
+
+impl<const N: usize> PartialOrd<AinStr> for [AinChar; N] {
+    #[inline]
+    fn partial_cmp(&self, other: &AinStr) -> Option<Ordering> {
+        PartialOrd::partial_cmp(AinStr::from_slice(self), other)
+    }
+}
+
+trait Sealed {}
+
+/// Trait to help map from slice-index types to the correct output types of [AinStr] indexing.
+#[allow(private_bounds)]
+pub trait AinSliceIndexOutputMap: Sealed {
+    type Output: ?Sized + 'static;
+
+    fn convert_slice_index_output(&self) -> &Self::Output;
+
+    fn convert_slice_index_output_mut(&mut self) -> &mut Self::Output;
+}
+
+impl Sealed for [AinChar] {}
+impl AinSliceIndexOutputMap for [AinChar] {
+    type Output = AinStr;
+
+    #[inline]
+    fn convert_slice_index_output(&self) -> &Self::Output {
+        AinStr::from_slice(self)
+    }
+
+    #[inline]
+    fn convert_slice_index_output_mut(&mut self) -> &mut Self::Output {
+        AinStr::from_slice_mut(self)
+    }
+}
+
+impl Sealed for AinChar {}
+impl AinSliceIndexOutputMap for AinChar {
+    type Output = Self;
+
+    #[inline]
+    fn convert_slice_index_output(&self) -> &Self::Output {
+        self
+    }
+
+    #[inline]
+    fn convert_slice_index_output_mut(&mut self) -> &mut Self::Output {
+        self
+    }
+}
+
+impl<S> Index<S> for AinStr
+where
+    S: SliceIndex<[AinChar]>,
+    S::Output: AinSliceIndexOutputMap + 'static,
+{
+    type Output = <S::Output as AinSliceIndexOutputMap>::Output;
+
+    #[inline]
+    fn index(&self, index: S) -> &Self::Output {
+        self.slice[index].convert_slice_index_output()
+    }
+}
+
+impl<S> IndexMut<S> for AinStr
+where
+    S: SliceIndex<[AinChar]>,
+    S::Output: AinSliceIndexOutputMap + 'static,
+{
+    #[inline]
+    fn index_mut(&mut self, index: S) -> &mut Self::Output {
+        self.slice[index].convert_slice_index_output_mut()
     }
 }
 
@@ -448,652 +1413,235 @@ impl AsRef<AinStr> for AinStr {
         self
     }
 }
-impl AsMut<AinStr> for AinStr {
+
+impl AsRef<[u8]> for AinStr {
     #[inline]
-    fn as_mut(&mut self) -> &mut AinStr {
-        self
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
     }
 }
+from_ref_from_as_ref!(const AinStr, [u8]);
+
+impl<'a> TryFrom<&'a [u8]> for &'a AinStr {
+    type Error = AinValidationError;
+
+    #[inline]
+    fn try_from(value: &'a [u8]) -> Result<Self, Self::Error> {
+        AinStr::from_ascii(value)
+    }
+}
+
+impl<'a> TryFrom<&'a mut [u8]> for &'a mut AinStr {
+    type Error = AinValidationError;
+
+    #[inline]
+    fn try_from(value: &'a mut [u8]) -> Result<Self, Self::Error> {
+        AinStr::from_ascii_mut(value)
+    }
+}
+
+impl AsRef<str> for AinStr {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+from_ref_from_as_ref!(const AinStr, str);
+
+impl<'a> TryFrom<&'a str> for &'a AinStr {
+    type Error = AinValidationError;
+
+    #[inline]
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        AinStr::from_str(value)
+    }
+}
+
+impl<'a> TryFrom<&'a mut str> for &'a mut AinStr {
+    type Error = AinValidationError;
+
+    #[inline]
+    fn try_from(value: &'a mut str) -> Result<Self, Self::Error> {
+        AinStr::from_str_mut(value)
+    }
+}
+
+impl AsRef<[AinChar]> for AinStr {
+    #[inline]
+    fn as_ref(&self) -> &[AinChar] {
+        self.as_slice()
+    }
+}
+
+impl AsMut<[AinChar]> for AinStr {
+    #[inline]
+    fn as_mut(&mut self) -> &mut [AinChar] {
+        self.as_mut_slice()
+    }
+}
+
+borrow_from_as_ref!(AinStr, [AinChar]);
+from_ref_from_as_ref!(AinStr, [AinChar]);
+
+impl Borrow<[AinChar]> for &AinStr {
+    #[inline]
+    fn borrow(&self) -> &[AinChar] {
+        self.as_slice()
+    }
+}
+
+impl Borrow<[AinChar]> for &mut AinStr {
+    #[inline]
+    fn borrow(&self) -> &[AinChar] {
+        self.as_slice()
+    }
+}
+
+impl BorrowMut<[AinChar]> for &mut AinStr {
+    #[inline]
+    fn borrow_mut(&mut self) -> &mut [AinChar] {
+        self.as_mut_slice()
+    }
+}
+
 impl AsRef<AinStr> for [AinChar] {
     #[inline]
     fn as_ref(&self) -> &AinStr {
-        self.into()
+        AinStr::from_slice(self)
     }
 }
+
 impl AsMut<AinStr> for [AinChar] {
     #[inline]
     fn as_mut(&mut self) -> &mut AinStr {
-        self.into()
-    }
-}
-impl AsRef<AsciiStr> for AinStr {
-    #[inline]
-    fn as_ref(&self) -> &AsciiStr {
-        self.into()
-    }
-}
-impl AsMut<AsciiStr> for AinStr {
-    #[inline]
-    fn as_mut(&mut self) -> &mut AsciiStr {
-        self.into()
-    }
-}
-impl AsRef<AinStr> for AsciiStr {
-    #[inline]
-    fn as_ref(&self) -> &AinStr {
-        self.into()
-    }
-}
-impl AsMut<AinStr> for AsciiStr {
-    #[inline]
-    fn as_mut(&mut self) -> &mut AinStr {
-        self.into()
-    }
-}
-impl AsRef<AinStr> for [AsciiChar] {
-    #[inline]
-    fn as_ref(&self) -> &AinStr {
-        self.into()
-    }
-}
-impl AsMut<AinStr> for [AsciiChar] {
-    #[inline]
-    fn as_mut(&mut self) -> &mut AinStr {
-        self.into()
+        AinStr::from_slice_mut(self)
     }
 }
 
-impl<'a> From<&'a AinStr> for &'a [AinChar] {
+borrow_from_as_ref!([AinChar], AinStr);
+from_ref_from_as_ref!([AinChar], AinStr);
+
+impl Default for &AinStr {
     #[inline]
-    fn from(astr: &AinStr) -> &[AinChar] {
-        &astr.slice
-    }
-}
-impl<'a> From<&'a mut AinStr> for &'a mut [AinChar] {
-    #[inline]
-    fn from(astr: &mut AinStr) -> &mut [AinChar] {
-        &mut astr.slice
-    }
-}
-impl<'a> From<&'a AinStr> for &'a [AsciiChar] {
-    #[inline]
-    fn from(astr: &AinStr) -> &[AsciiChar] {
-        // SAFETY: Both AsciiChar and AinChar have the same repr.
-        let ptr = astr.as_slice() as *const [AinChar] as *const [AsciiChar];
-        // SAFETY: Ptr came from a ref with same mutability.
-        unsafe { &*ptr }
-    }
-}
-impl<'a> From<&'a mut AinStr> for &'a mut [AsciiChar] {
-    #[inline]
-    fn from(astr: &mut AinStr) -> &mut [AsciiChar] {
-        // SAFETY: Both AsciiChar and AinChar have the same repr.
-        let ptr = astr.as_mut_slice() as *mut [AinChar] as *mut [AsciiChar];
-        // SAFETY: Ptr came from a ref with same mutability.
-        unsafe { &mut *ptr }
-    }
-}
-impl<'a> From<&'a [AsciiChar]> for &'a AinStr {
-    #[inline]
-    fn from(astr: &[AsciiChar]) -> &AinStr {
-        // SAFETY: Both AsciiChar and AinChar have the same repr.
-        let ptr = astr as *const [AsciiChar] as *const [AinChar];
-        // SAFETY: Ptr came from a ref with same mutability.
-        unsafe { &*ptr }.into()
-    }
-}
-impl<'a> From<&'a mut [AsciiChar]> for &'a mut AinStr {
-    #[inline]
-    fn from(astr: &mut [AsciiChar]) -> &mut AinStr {
-        // SAFETY: Both AsciiChar and AinChar have the same repr.
-        let ptr = astr as *mut [AsciiChar] as *mut [AinChar];
-        // SAFETY: Ptr came from a ref with same mutability.
-        unsafe { &mut *ptr }.into()
-    }
-}
-impl<'a> From<&'a AinStr> for &'a [u8] {
-    #[inline]
-    fn from(astr: &AinStr) -> &[u8] {
-        astr.as_bytes()
-    }
-}
-impl<'a> From<&'a AinStr> for &'a str {
-    #[inline]
-    fn from(astr: &AinStr) -> &str {
-        astr.as_str()
-    }
-}
-impl<'a> From<&'a AinStr> for &'a AsciiStr {
-    #[inline]
-    fn from(astr: &AinStr) -> &AsciiStr {
-        <&AinStr as Into<&[AsciiChar]>>::into(astr).into()
-    }
-}
-impl<'a> From<&'a AsciiStr> for &'a AinStr {
-    #[inline]
-    fn from(astr: &AsciiStr) -> &AinStr {
-        <&AsciiStr as Into<&[AsciiChar]>>::into(astr).into()
-    }
-}
-impl<'a> From<&'a mut AinStr> for &'a mut AsciiStr {
-    #[inline]
-    fn from(astr: &mut AinStr) -> &mut AsciiStr {
-        <&mut AinStr as Into<&mut [AsciiChar]>>::into(astr).into()
-    }
-}
-impl<'a> From<&'a mut AsciiStr> for &'a mut AinStr {
-    #[inline]
-    fn from(astr: &mut AsciiStr) -> &mut AinStr {
-        <&mut AsciiStr as Into<&mut [AsciiChar]>>::into(astr).into()
+    fn default() -> &'static AinStr {
+        AinStr::empty()
     }
 }
 
-macro_rules! widen_box {
-    ($wider: ty) => {
-        #[cfg(feature = "alloc")]
-        impl From<Box<AinStr>> for Box<$wider> {
-            #[inline]
-            fn from(owned: Box<AinStr>) -> Box<$wider> {
-                let ptr = Box::into_raw(owned) as *mut $wider;
-                unsafe { Box::from_raw(ptr) }
-            }
-        }
-    };
-}
-widen_box! {[AinChar]}
-widen_box! {[u8]}
-widen_box! {str}
-
-// allows &AinChar to be used by generic AinString Extend and FromIterator
-impl AsRef<AinStr> for AinChar {
-    fn as_ref(&self) -> &AinStr {
-        slice::from_ref(self).into()
-    }
-}
-
-impl fmt::Display for AinStr {
+impl Default for &mut AinStr {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self.as_str(), f)
+    fn default() -> &'static mut AinStr {
+        AinStr::empty_mut()
     }
 }
 
-impl fmt::Debug for AinStr {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self.as_str(), f)
-    }
-}
-
-macro_rules! impl_index {
-    ($idx:ty) => {
-        #[allow(clippy::indexing_slicing)] // In `Index`, if it's out of bounds, panic is the default
-        impl Index<$idx> for AinStr {
-            type Output = AinStr;
-
-            #[inline]
-            fn index(&self, index: $idx) -> &AinStr {
-                self.slice[index].as_ref()
-            }
-        }
-
-        #[allow(clippy::indexing_slicing)] // In `IndexMut`, if it's out of bounds, panic is the default
-        impl IndexMut<$idx> for AinStr {
-            #[inline]
-            fn index_mut(&mut self, index: $idx) -> &mut AinStr {
-                self.slice[index].as_mut()
-            }
-        }
-    };
-}
-
-impl_index! { core::ops::Range<usize> }
-impl_index! { core::ops::RangeFrom<usize> }
-impl_index! { core::ops::RangeInclusive<usize> }
-impl_index! { core::ops::RangeToInclusive<usize> }
-impl_index! { core::range::Range<usize> }
-impl_index! { core::range::RangeTo<usize> }
-impl_index! { core::range::RangeFrom<usize> }
-impl_index! { core::range::RangeFull }
-impl_index! { core::range::RangeInclusive<usize> }
-impl_index! { core::range::RangeToInclusive<usize> }
-
-impl Index<usize> for AinStr {
-    type Output = AinChar;
-
-    #[inline]
-    fn index(&self, index: usize) -> &AinChar {
-        &self.slice[index]
-    }
-}
-
-impl IndexMut<usize> for AinStr {
-    #[inline]
-    fn index_mut(&mut self, index: usize) -> &mut AinChar {
-        &mut self.slice[index]
-    }
-}
-
-/// Produces references for compatibility with `[u8]`.
-///
-/// (`str` doesn't implement `IntoIterator` for its references,
-///  so there is no compatibility to lose.)
+/// Unlike primitive slices, which return by reference because they don't know if the `T` type in
+/// `[T]` is `Copy`, `AinStr` produces a copying iterator when iterated by reference.
 impl<'a> IntoIterator for &'a AinStr {
-    type Item = &'a AinChar;
-    type IntoIter = CharsRef<'a>;
+    type Item = AinChar;
+    type IntoIter = Chars<'a>;
+
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        CharsRef(self.as_slice().iter())
+        self.chars()
     }
 }
 
 impl<'a> IntoIterator for &'a mut AinStr {
     type Item = &'a mut AinChar;
     type IntoIter = CharsMut<'a>;
+
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.chars_mut()
     }
 }
 
-/// A copying iterator over the characters of an `AinStr`.
-#[derive(Clone, Debug)]
-pub struct Chars<'a>(Iter<'a, AinChar>);
-impl<'a> Chars<'a> {
-    /// Returns the ascii string slice with the remaining characters.
-    #[must_use]
-    pub fn as_str(&self) -> &'a AinStr {
-        self.0.as_slice().into()
-    }
-}
-impl<'a> Iterator for Chars<'a> {
-    type Item = AinChar;
-    #[inline]
-    fn next(&mut self) -> Option<AinChar> {
-        self.0.next().copied()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-impl<'a> DoubleEndedIterator for Chars<'a> {
-    #[inline]
-    fn next_back(&mut self) -> Option<AinChar> {
-        self.0.next_back().copied()
-    }
-}
-impl<'a> ExactSizeIterator for Chars<'a> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-}
+#[cfg(test)]
+mod tests {
+    use core::cmp::Ordering;
+    use hashbrown::HashSet;
 
-/// A mutable iterator over the characters of an `AinStr`.
-#[derive(Debug)]
-pub struct CharsMut<'a>(IterMut<'a, AinChar>);
-impl<'a> CharsMut<'a> {
-    /// Returns the ascii string slice with the remaining characters.
-    #[must_use]
-    pub fn into_str(self) -> &'a mut AinStr {
-        self.0.into_slice().into()
-    }
-}
-impl<'a> Iterator for CharsMut<'a> {
-    type Item = &'a mut AinChar;
-    #[inline]
-    fn next(&mut self) -> Option<&'a mut AinChar> {
-        self.0.next()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-impl<'a> DoubleEndedIterator for CharsMut<'a> {
-    #[inline]
-    fn next_back(&mut self) -> Option<&'a mut AinChar> {
-        self.0.next_back()
-    }
-}
-impl<'a> ExactSizeIterator for CharsMut<'a> {
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-}
+    #[test]
+    fn case_insensitive_equality() {
+        assert_eq!(ain!("abcd"), ain!("ABCD"));
+        assert_eq!(ain!("abcd"), &[ain!('A'), ain!('b'), ain!('C'), ain!('d')]);
+        assert_eq!(
+            ain!("abcd"),
+            &[ain!('A'), ain!('b'), ain!('C'), ain!('d')][..]
+        );
 
-/// An immutable iterator over the characters of an `AinStr`.
-#[derive(Clone, Debug)]
-pub struct CharsRef<'a>(Iter<'a, AinChar>);
-impl<'a> CharsRef<'a> {
-    /// Returns the ascii string slice with the remaining characters.
-    #[must_use]
-    pub fn as_str(&self) -> &'a AinStr {
-        self.0.as_slice().into()
-    }
-}
-impl<'a> Iterator for CharsRef<'a> {
-    type Item = &'a AinChar;
-    #[inline]
-    fn next(&mut self) -> Option<&'a AinChar> {
-        self.0.next()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-impl<'a> DoubleEndedIterator for CharsRef<'a> {
-    #[inline]
-    fn next_back(&mut self) -> Option<&'a AinChar> {
-        self.0.next_back()
-    }
-}
+        assert_eq!(ain!("abcd"), ain!("abcd"));
+        assert_eq!(ain!("AbCd"), ain!("aBcD"));
 
-/// An iterator over parts of an `AinStr` separated by an `AinChar`.
-///
-/// This type is created by [`AinChar::split()`](struct.AinChar.html#method.split).
-#[derive(Clone, Debug)]
-struct Split<'a> {
-    on: AinChar,
-    ended: bool,
-    chars: Chars<'a>,
-}
-impl<'a> Iterator for Split<'a> {
-    type Item = &'a AinStr;
-
-    fn next(&mut self) -> Option<&'a AinStr> {
-        if !self.ended {
-            let start: &AinStr = self.chars.as_str();
-            let split_on = self.on;
-
-            if let Some(at) = self.chars.position(|ch| ch == split_on) {
-                // SAFETY: `at` is guaranteed to be in bounds, as `position` returns `Ok(0..len)`.
-                Some(unsafe { start.as_slice().get_unchecked(..at).into() })
-            } else {
-                self.ended = true;
-                Some(start)
-            }
-        } else {
-            None
-        }
-    }
-}
-impl<'a> DoubleEndedIterator for Split<'a> {
-    fn next_back(&mut self) -> Option<&'a AinStr> {
-        if !self.ended {
-            let start: &AinStr = self.chars.as_str();
-            let split_on = self.on;
-
-            if let Some(at) = self.chars.rposition(|ch| ch == split_on) {
-                // SAFETY: `at` is guaranteed to be in bounds, as `rposition` returns `Ok(0..len)`, and slices `1..`, `2..`, etc... until `len..` inclusive, are valid.
-                Some(unsafe { start.as_slice().get_unchecked(at + 1..).into() })
-            } else {
-                self.ended = true;
-                Some(start)
-            }
-        } else {
-            None
-        }
-    }
-}
-
-/// An iterator over the lines of the internal character array.
-#[derive(Clone, Debug)]
-struct Lines<'a> {
-    string: &'a AinStr,
-}
-impl<'a> Iterator for Lines<'a> {
-    type Item = &'a AinStr;
-
-    fn next(&mut self) -> Option<&'a AinStr> {
-        if let Some(idx) = self.string.chars().position(|chr| chr == AinChar::LineFeed) {
-            // SAFETY: `idx` is guaranteed to be `1..len`, as we get it from `position` as `0..len` and make sure it's not `0`.
-            let line = if idx > 0
-                && *unsafe { self.string.as_slice().get_unchecked(idx - 1) }
-                    == AinChar::CarriageReturn
-            {
-                // SAFETY: As per above, `idx` is guaranteed to be `1..len`
-                unsafe { self.string.as_slice().get_unchecked(..idx - 1).into() }
-            } else {
-                // SAFETY: As per above, `idx` is guaranteed to be `0..len`
-                unsafe { self.string.as_slice().get_unchecked(..idx).into() }
-            };
-            // SAFETY: As per above, `idx` is guaranteed to be `0..len`, so at the extreme, slicing `len..` is a valid empty slice.
-            self.string = unsafe { self.string.as_slice().get_unchecked(idx + 1..).into() };
-            Some(line)
-        } else if self.string.is_empty() {
-            None
-        } else {
-            let line = self.string;
-            // SAFETY: An empty string is a valid string.
-            self.string = unsafe { AinStr::from_ascii_unchecked(b"") };
-            Some(line)
-        }
-    }
-}
-
-impl<'a> DoubleEndedIterator for Lines<'a> {
-    fn next_back(&mut self) -> Option<&'a AinStr> {
-        if self.string.is_empty() {
-            return None;
-        }
-
-        // If we end with `LF` / `CR/LF`, remove them
-        if self.string.last() == Some(AinChar::LineFeed) {
-            // SAFETY: `last()` returned `Some`, so our len is at least 1.
-            self.string = unsafe {
-                self.string
-                    .as_slice()
-                    .get_unchecked(..self.string.len() - 1)
-                    .into()
-            };
-
-            if self.string.last() == Some(AinChar::CarriageReturn) {
-                // SAFETY: `last()` returned `Some`, so our len is at least 1.
-                self.string = unsafe {
-                    self.string
-                        .as_slice()
-                        .get_unchecked(..self.string.len() - 1)
-                        .into()
-                };
-            }
-        }
-
-        // Get the position of the first `LF` from the end.
-        let lf_rev_pos = self
-            .string
-            .chars()
-            .rev()
-            .position(|ch| ch == AinChar::LineFeed)
-            .unwrap_or_else(|| self.string.len());
-
-        // SAFETY: `lf_rev_pos` will be in range `0..=len`, so `len - lf_rev_pos`
-        //         will be within `0..=len`, making it correct as a start and end
-        //         point for the strings.
-        let line = unsafe {
-            self.string
-                .as_slice()
-                .get_unchecked(self.string.len() - lf_rev_pos..)
-                .into()
-        };
-        self.string = unsafe {
-            self.string
-                .as_slice()
-                .get_unchecked(..self.string.len() - lf_rev_pos)
-                .into()
-        };
-        Some(line)
-    }
-}
-
-/// Convert slices of bytes or [`AinChar`] to [`AinStr`].
-// Could nearly replace this trait with SliceIndex, but its methods isn't even
-// on a path for stabilization.
-pub trait AsAinStr {
-    /// Used to constrain `SliceIndex`
-    #[doc(hidden)]
-    type Inner;
-    /// Convert a subslice to an ASCII slice.
-    ///
-    /// # Errors
-    /// Returns `Err` if the range is out of bounds or if not all bytes in the
-    /// slice are ASCII. The value in the error will be the index of the first
-    /// non-ASCII byte or the end of the slice.
-    ///
-    /// # Examples
-    /// ```
-    /// use ain::AsAinStr;
-    /// assert!("'zoä'".slice_ascii(..3).is_ok());
-    /// assert!("'zoä'".slice_ascii(0..4).is_err());
-    /// assert!("'zoä'".slice_ascii(5..=5).is_ok());
-    /// assert!("'zoä'".slice_ascii(4..).is_err());
-    /// assert!(b"\r\n".slice_ascii(..).is_ok());
-    /// ```
-    fn slice_ain<R>(&self, range: R) -> Result<&AinStr, AsAinStrError>
-    where
-        R: SliceIndex<[Self::Inner], Output = [Self::Inner]>;
-    /// Convert to an ASCII slice.
-    ///
-    /// # Errors
-    /// Returns `Err` if not all bytes are valid ascii values.
-    ///
-    /// # Example
-    /// ```
-    /// use ain::{AsAinStr, AinChar};
-    /// assert!("ASCII".as_ascii_str().is_ok());
-    /// assert!(b"\r\n".as_ascii_str().is_ok());
-    /// assert!("'zoä'".as_ascii_str().is_err());
-    /// assert!(b"\xff".as_ascii_str().is_err());
-    /// assert!([AinChar::C][..].as_ascii_str().is_ok()); // infallible
-    /// ```
-    fn as_ain_str(&self) -> Result<&AinStr, AsAinStrError> {
-        self.slice_ain(..)
-    }
-    /// Get a single ASCII character from the slice.
-    ///
-    /// Returns `None` if the index is out of bounds or the byte is not ASCII.
-    ///
-    /// # Examples
-    /// ```
-    /// use ain::{AsAinStr, AinChar};
-    /// assert_eq!("'zoä'".get_ascii(4), None);
-    /// assert_eq!("'zoä'".get_ascii(5), Some(AinChar::Apostrophe));
-    /// assert_eq!("'zoä'".get_ascii(6), None);
-    /// ```
-    fn get_ain(&self, index: usize) -> Option<AinChar> {
-        self.slice_ain(index..=index).ok().and_then(AinStr::first)
-    }
-    /// Convert to an ASCII slice without checking for non-ASCII characters.
-    ///
-    /// # Safety
-    /// Calling this function when `self` contains non-ascii characters is
-    /// undefined behavior.
-    ///
-    /// # Examples
-    ///
-    unsafe fn as_ain_str_unchecked(&self) -> &AinStr;
-}
-
-/// Convert mutable slices of bytes or [`AinChar`] to [`AinStr`].
-pub trait AsMutAinStr: AsAinStr {
-    /// Convert a subslice to an ASCII slice.
-    ///
-    /// # Errors
-    /// This function returns `Err` if range is out of bounds, or if
-    /// `self` contains non-ascii values
-    fn slice_ain_mut<R>(&mut self, range: R) -> Result<&mut AinStr, AsAinStrError>
-    where
-        R: SliceIndex<[Self::Inner], Output = [Self::Inner]>;
-
-    /// Convert to a mutable ASCII slice.
-    ///
-    /// # Errors
-    /// This function returns `Err` if `self` contains non-ascii values
-    fn as_mut_ain_str(&mut self) -> Result<&mut AinStr, AsAinStrError> {
-        self.slice_ain_mut(..)
+        assert_ne!(ain!("AbCd"), ain!("aBc"));
+        assert_ne!(ain!("AbCd"), ain!("aBcDe"));
+        assert_ne!(ain!("AbCdf"), ain!("aBcDe"));
     }
 
-    /// Convert to a mutable ASCII slice without checking for non-ASCII characters.
-    ///
-    /// # Safety
-    /// Calling this function when `self` contains non-ascii characters is
-    /// undefined behavior.
-    unsafe fn as_mut_ain_str_unchecked(&mut self) -> &mut AinStr;
-}
+    #[test]
+    fn ord_upper_case() {
+        assert_eq!(ain!("abcd").cmp(ain!("ABCD")), Ordering::Equal);
+        assert_eq!(ain!("abcd").cmp(ain!("ABCe")), Ordering::Less);
+        assert_eq!(ain!("abcF").cmp(ain!("ABCe")), Ordering::Greater);
 
-impl AsAsciiStr for AinStr {
-    type Inner = AsciiChar;
+        // Grave accent '`'` occurs between upper and lower case in ASCII.
+        assert!(b'A' < b'`');
+        assert!(b'`' < b'a');
+        assert_eq!(ain!("A").cmp(ain!("`")), Ordering::Less);
+        assert_eq!(ain!("a").cmp(ain!("`")), Ordering::Less);
 
-    fn slice_ascii<R>(&self, range: R) -> Result<&AsciiStr, AsAinStrError>
-    where
-        R: SliceIndex<[Self::Inner], Output = [Self::Inner]>,
-    {
-        let ascii: &AsciiStr = self.into();
-        AsAsciiStr::slice_ascii(ascii, range)
+        assert_eq!(
+            ain!("abcd").partial_cmp(&[ain!('A'), ain!('b'), ain!('C'), ain!('E')]),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            ain!("abce").partial_cmp(&[ain!('A'), ain!('b'), ain!('C'), ain!('d')][..]),
+            Some(Ordering::Greater)
+        );
     }
 
-    unsafe fn as_ascii_str_unchecked(&self) -> &AsciiStr {
-        self.into()
-    }
-}
+    #[test]
+    fn ord_bigger_than_block_size() {
+        assert_eq!(
+            ain!("abcdefghijKlmnopQrstuvwxyz").cmp(ain!("AbcdefghijklMnOPQrstuvwxYZ")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            ain!("abcdefghijKlmnopQrstuvwxyy").cmp(ain!("AbcdefghijklMnOPQrstuvwxYZ")),
+            Ordering::Less
+        );
+        assert_eq!(
+            ain!("abcdefghijKlmnopQrstuvwxyz").cmp(ain!("AbcdefghijklMnOPQrstuvwxYY")),
+            Ordering::Greater
+        );
 
-impl AsMutAsciiStr for AinStr {
-    fn slice_ascii_mut<R>(&mut self, range: R) -> Result<&mut AsciiStr, AsAinStrError>
-    where
-        R: SliceIndex<[Self::Inner], Output = [Self::Inner]>,
-    {
-        let ascii: &mut AsciiStr = self.into();
-        AsMutAsciiStr::slice_ascii_mut(ascii, range)
-    }
+        // Difference just before the block boundary.
+        assert_eq!(
+            ain!("abcdefghijKlmnoAQrstuvwxyz").cmp(ain!("AbcdefghijklMnOPQrstuvwxYy")),
+            Ordering::Less
+        );
+        assert_eq!(
+            ain!("abcdefghijKlmnopQrstuvwxYY").cmp(ain!("AbcdefghijklMnOAQrstuvwxYz")),
+            Ordering::Greater
+        );
 
-    unsafe fn as_mut_ascii_str_unchecked(&mut self) -> &mut AsciiStr {
-        self.into()
-    }
-}
-
-impl<T: AsAsciiStr + ?Sized> AsAinStr for T {
-    type Inner = <T as AsAsciiStr>::Inner;
-
-    #[inline]
-    fn slice_ain<R>(&self, range: R) -> Result<&AinStr, AsAinStrError>
-    where
-        R: SliceIndex<[Self::Inner], Output = [Self::Inner]>,
-    {
-        self.slice_ascii(range).map(Into::into)
-    }
-
-    #[inline]
-    unsafe fn as_ain_str_unchecked(&self) -> &AinStr {
-        // SAFETY: invariants are identical to as_ain_str_unchecked.
-        unsafe { self.as_ascii_str_unchecked() }.into()
-    }
-
-    #[inline]
-    fn as_ain_str(&self) -> Result<&AinStr, AsAinStrError> {
-        self.as_ascii_str().map(Into::into)
+        // Difference just after the block boundary.
+        assert_eq!(
+            ain!("abcdefghijKlmnopQrstuvwxyz").cmp(ain!("AbcdefghijklMnOPZrstuvwxYy")),
+            Ordering::Less
+        );
+        assert_eq!(
+            ain!("abcdefghijKlmnopZrstuvwxYY").cmp(ain!("AbcdefghijklMnOPQrstuvwxYz")),
+            Ordering::Greater
+        );
     }
 
-    #[inline]
-    fn get_ain(&self, index: usize) -> Option<AinChar> {
-        self.get_ascii(index).map(Into::into)
-    }
-}
-
-impl<T: AsMutAsciiStr + ?Sized> AsMutAinStr for T {
-    #[inline]
-    fn slice_ain_mut<R>(&mut self, range: R) -> Result<&mut AinStr, AsAinStrError>
-    where
-        R: SliceIndex<[Self::Inner], Output = [Self::Inner]>,
-    {
-        self.slice_ascii_mut(range).map(Into::into)
-    }
-
-    #[inline]
-    unsafe fn as_mut_ain_str_unchecked(&mut self) -> &mut AinStr {
-        // SAFETY: invariants are identical to as_mut_ain_str_unchecked.
-        unsafe { self.as_mut_ascii_str_unchecked() }.into()
-    }
-
-    #[inline]
-    fn as_mut_ain_str(&mut self) -> Result<&mut AinStr, AsAinStrError> {
-        self.as_mut_ascii_str().map(Into::into)
+    #[test]
+    fn hash_matches_slice() {
+        let mut set = HashSet::new();
+        set.insert(ain!("ABCD"));
+        assert!(set.contains(ain!("abcd")));
+        assert!(set.contains(&[ain!('a'), ain!('B'), ain!('c'), ain!('D')][..]));
     }
 }

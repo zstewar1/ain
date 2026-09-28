@@ -1,0 +1,18 @@
+ASCII Insensitive
+
+Copyright 2026 Zachary Stewart
+
+This product includes software developed by The Rust Project Developers and its individual
+contributors.
+
+Portions of this software incorporate heavily modified code snippets, algorithms, and logic derived
+from the following upstream components:
+
+-   The Rust Standard Library (including but not limited to `std::ascii::Char`, `std::str`, and
+    `std::string::String`). https://github.com/rust-lang/rust
+-   The `ascii` crate. https://github.com/tomprogrammer/rust-ascii
+
+Original Copyright:
+
+Copyright (c) 2010-2014 The Rust Project Developers Licensed under the Apache License, Version 2.0
+and the MIT License.

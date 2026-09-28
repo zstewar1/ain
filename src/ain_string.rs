@@ -4,27 +4,27 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use core::any::Any;
 use core::borrow::{Borrow, BorrowMut};
+use core::cmp::Ordering;
+use core::error::Error;
 use core::fmt;
+use core::hash::Hash;
 use core::ops::{Add, AddAssign, Deref, DerefMut, Index, IndexMut};
+use core::slice::SliceIndex;
 use core::str::FromStr;
-#[cfg(feature = "std")]
-use std::error::Error;
 
-use ascii::{AsAsciiStr, AsciiString};
-
-use crate::{AinChar, AinStr, AsAinStr, AsAinStrError};
+use crate::iter::{Chars, CharsMut, IntoChars};
+use crate::validation::run_ain_validation;
+use crate::{AinChar, AinSliceIndexOutputMap, AinStr, AinValidationError};
 
 /// A growable string stored as a case-insensitive ASCII encoded buffer.
 ///
-/// Since the range of allowed values is exactly the same as [`AinString`] it is always safe to
-/// convert between them bidirectionally.
-// Because AinChar implements eq, ord, and hash with case-insensitive checks, we can derive these
-// here and get correct case-insensitive behavior.
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
+/// For Ord, the 'case insensitive' order is to treat all characters as uppercase. This affects the
+/// sort order of letters relative to the following symbols, which lie between uppercase and
+/// lowercase ascii: `` [\]^_` ``
+// We could derive PartialEq, Ord, and PartialOrd, but we better ensure autovectorization
+// by writing them ourselves.
+#[derive(Default, Clone, Eq)]
 pub struct AinString {
     vec: Vec<AinChar>,
 }
@@ -39,8 +39,8 @@ impl AinString {
     /// # use ain::AinString;
     /// let mut s = AinString::new();
     /// ```
-    #[inline]
     #[must_use]
+    #[inline]
     pub const fn new() -> Self {
         AinString { vec: Vec::new() }
     }
@@ -54,12 +54,70 @@ impl AinString {
     /// # use ain::AinString;
     /// let mut s = AinString::with_capacity(10);
     /// ```
-    #[inline]
     #[must_use]
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         AinString {
             vec: Vec::with_capacity(capacity),
         }
+    }
+
+    /// Convert a vector of AinChar into an AinString.
+    #[must_use]
+    #[inline]
+    pub const fn from_vec(vec: Vec<AinChar>) -> Self {
+        Self { vec }
+    }
+
+    /// Convert a string to an AinStr
+    #[inline]
+    pub fn from_string(s: String) -> Result<Self, AinStringFromError<String>> {
+        match run_ain_validation(s.as_bytes()) {
+            Ok(()) => {
+                let bytes = s.into_bytes();
+                // SAFETY: we just checked that the bytes are valid.
+                Ok(unsafe { Self::from_ascii_unchecked(bytes) })
+            }
+            Err(error) => Err(AinStringFromError { error, owner: s }),
+        }
+    }
+
+    /// Convert a vector of ASCII bytes into an AinString.
+    #[inline]
+    pub fn from_ascii(bytes: Vec<u8>) -> Result<Self, AinStringFromError<Vec<u8>>> {
+        match run_ain_validation(&bytes) {
+            Ok(()) => {
+                // SAFETY: we just checked that the bytes are valid.
+                Ok(unsafe { Self::from_ascii_unchecked(bytes) })
+            }
+            Err(error) => Err(AinStringFromError {
+                error,
+                owner: bytes,
+            }),
+        }
+    }
+
+    /// Creates an `AinString` from a boxed `AinStr` slice without copying or allocating.
+    #[must_use]
+    #[inline]
+    pub fn from_boxed_ain_str(boxed: Box<AinStr>) -> Self {
+        Self::from_vec(boxed.into_boxed_slice().into_vec())
+    }
+
+    /// Converts a vector of ascii bytes into an AinString without checking whether they are valid.
+    ///
+    /// # Safety
+    ///
+    /// The input vector must contain only ASCII bytes otherwise undefined behavior occurs.
+    #[must_use]
+    #[inline]
+    pub unsafe fn from_ascii_unchecked(vec: Vec<u8>) -> Self {
+        let (ptr, len, cap) = vec.into_raw_parts();
+        // SAFETY: we already validated that the contents are all valid ASCII, and otherwise
+        // AinChar is identical repr and stuch with u8.
+        let ptr = ptr.cast::<AinChar>();
+        let vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
+        Self::from_vec(vec)
     }
 
     /// Creates a new `AinString` from a length, capacity and pointer.
@@ -83,119 +141,124 @@ impl AinString {
     /// Basic usage:
     ///
     /// ```
-    /// # use ain::AinString;
-    /// use std::mem;
+    /// # use ain::{ain, AinString};
     ///
-    /// unsafe {
-    ///    let mut s = AinString::from_ascii("hello").unwrap();
-    ///    let ptr = s.as_mut_ptr();
-    ///    let len = s.len();
-    ///    let capacity = s.capacity();
-    ///
-    ///    mem::forget(s);
-    ///
-    ///    let s = AinString::from_raw_parts(ptr, len, capacity);
-    ///
-    ///    assert_eq!(AinString::from_ascii("hello").unwrap(), s);
-    /// }
+    /// let s = ain!("hello").to_ain_string();
+    /// let (ptr, len, cap) = s.into_raw_parts();
+    /// let s = unsafe { AinString::from_raw_parts(ptr, len, cap) };
+    /// assert_eq!(s.as_str(), "hello");
     /// ```
-    #[inline]
     #[must_use]
+    #[inline]
     pub unsafe fn from_raw_parts(buf: *mut AinChar, length: usize, capacity: usize) -> Self {
         AinString {
-            // SAFETY: Caller guarantees that `buf` was previously allocated by this library,
-            //         that `buf` contains `length` valid ascii elements and has a total capacity
-            //         of `capacity` elements, and that nothing else is using the momory.
+            // SAFETY: Caller guarantees that `buf` was previously allocated by this library, that
+            // `buf` contains `length` valid ascii elements and has a total capacity of `capacity`
+            // elements, and that nothing else is using the memory.
             vec: unsafe { Vec::from_raw_parts(buf, length, capacity) },
         }
     }
 
-    /// Converts a vector of bytes to an `AinString` without checking for non-ASCII characters.
-    ///
-    /// # Safety
-    /// This function is unsafe because it does not check that the bytes passed to it are valid
-    /// ASCII characters. If this constraint is violated, it may cause memory unsafety issues with
-    /// future of the `AinString`, as the rest of this library assumes that `AinString`s are
-    /// ASCII encoded.
-    #[inline]
+    /// Converts this `AinString` into a `Vec<AinChar>` without copying or allocating.
     #[must_use]
-    pub unsafe fn from_ascii_unchecked<B>(bytes: B) -> Self
-    where
-        B: Into<Vec<u8>>,
-    {
-        let bytes = bytes.into();
-        // SAFETY: The caller guarantees all bytes are valid ascii bytes.
-        let (ptr, len, cap) = bytes.into_raw_parts();
-        let ptr = ptr.cast::<AinChar>();
-
-        // SAFETY: We guarantee all invariants, as we got the
-        //         pointer, length and capacity from a `Vec`,
-        //         and we also guarantee the pointer is valid per
-        //         the `SAFETY` notice above.
-        let vec = unsafe { Vec::from_raw_parts(ptr, len, cap) };
-
-        Self { vec }
-    }
-
-    /// Converts anything that can represent a byte buffer into an `AinString`.
-    ///
-    /// # Errors
-    /// Returns the byte buffer if not all of the bytes are ASCII characters.
-    ///
-    /// # Examples
-    /// ```
-    /// # use ain::AinString;
-    /// let foo = AinString::from_ascii("foo".to_string()).unwrap();
-    /// let err = AinString::from_ascii("Ŋ".to_string()).unwrap_err();
-    /// assert_eq!(foo.as_str(), "foo");
-    /// assert_eq!(err.into_source(), "Ŋ");
-    /// ```
-    pub fn from_ascii<B>(bytes: B) -> Result<AinString, IntoAinStringError<B>>
-    where
-        B: Into<Vec<u8>> + AsRef<[u8]>,
-    {
-        match bytes.as_ref().as_ascii_str() {
-            // SAFETY: `as_ascii_str` guarantees all bytes are valid ascii bytes.
-            Ok(_) => Ok(unsafe { AinString::from_ascii_unchecked(bytes) }),
-            Err(e) => Err(IntoAinStringError {
-                error: e,
-                owner: bytes,
-            }),
-        }
-    }
-
-    /// Pushes the given ASCII string onto this ASCII string buffer.
-    ///
-    /// # Examples
-    /// ```
-    /// # use ain::{AinString, AsAinStr};
-    /// use std::str::FromStr;
-    /// let mut s = AinString::from_str("foo").unwrap();
-    /// s.push_str("bar".as_ascii_str().unwrap());
-    /// assert_eq!(s, "foobar".as_ascii_str().unwrap());
-    /// ```
     #[inline]
-    pub fn push_str(&mut self, string: &AinStr) {
-        self.vec.extend(string.chars());
+    pub fn into_vec(self) -> Vec<AinChar> {
+        self.vec
     }
 
-    /// Inserts the given ASCII string at the given place in this ASCII string buffer.
+    /// Convert this `AinString` into a `String` without copying or allocating.
     ///
-    /// # Panics
+    /// Since ASCII is a subset of utf-8, this is guaranteed to succeed, not utf-8 validation
+    /// needed.
+    #[must_use]
+    #[inline]
+    pub fn into_string(self) -> String {
+        let bytes = self.into_bytes();
+        // SAFETY: the bytes are guaranteed ASCII, so they must also be valud utf-8.
+        unsafe { String::from_utf8_unchecked(bytes) }
+    }
+
+    /// Convert this `AinString` into a vector of bytes without copying or allocating.
+    #[must_use]
+    #[inline]
+    pub fn into_bytes(self) -> Vec<u8> {
+        let (ptr, len, cap) = self.vec.into_raw_parts();
+        // SAFETY: every AinChar is a valid u8 since its repr(transparent) over a repr(u8) enum.
+        // Since we just got the data from a vec, it is safe to turn it back into a vec.
+        let ptr = ptr.cast::<u8>();
+        unsafe { Vec::from_raw_parts(ptr, len, cap) }
+    }
+
+    /// Converts this [`AinString`] into a [`Box`]`<`[`AinStr`]`>`.
     ///
-    /// Panics if `idx` is larger than the `AinString`'s length.
+    /// This will drop any excess capacity
+    #[must_use]
+    #[inline]
+    pub fn into_boxed_ain_str(self) -> Box<AinStr> {
+        let slice = self.vec.into_boxed_slice();
+        let ptr = Box::into_raw(slice) as *mut AinStr;
+        // SAFETY: AinStr has the same repr as [AinChar]
+        unsafe { Box::from_raw(ptr) }
+    }
+
+    /// Gets self as an [AinStr] slice.
+    #[must_use]
+    #[inline]
+    pub const fn as_ain_str(&self) -> &AinStr {
+        AinStr::from_slice(self.vec.as_slice())
+    }
+
+    /// Gets self as a mutable [AinStr] slice.
+    #[must_use]
+    #[inline]
+    pub const fn as_mut_ain_str(&mut self) -> &mut AinStr {
+        AinStr::from_slice_mut(self.vec.as_mut_slice())
+    }
+
+    /// Decomposes an `AinString` into its raw components: (pointer, length, capacity).
+    ///
+    /// Returns the raw pointer to the underlying data, the length of the string (in bytes), and the
+    /// allocated capacity of the data (in bytes). These are the same arguments in the same order as
+    /// the arguments to [from_raw_parts][Self::from_raw_parts].
+    ///
+    /// After calling this function, the caller is responsible for the memory previously managed by
+    /// the `AinString`. The only way to do this is to convert the raw pointer, length, and capacity
+    /// back into an `AinString` with the `from_raw_parts` function, allowing the destructor to
+    /// perform the cleanup.
+    #[must_use]
+    #[inline]
+    pub fn into_raw_parts(self) -> (*mut AinChar, usize, usize) {
+        self.vec.into_raw_parts()
+    }
+
+    /// Returns the number of bytes in this ASCII string.
     ///
     /// # Examples
     /// ```
-    /// # use ain::{AinString, AsAinStr};
-    /// use std::str::FromStr;
-    /// let mut s = AinString::from_str("abc").unwrap();
-    /// s.insert_str(1, "def".as_ascii_str().unwrap());
-    /// assert_eq!(&*s, "adefbc");
+    /// # use ain::ain;
+    /// let s = ain!("foo").to_ain_string();
+    /// assert_eq!(s.len(), 3);
+    /// ```
+    #[must_use]
     #[inline]
-    pub fn insert_str(&mut self, idx: usize, string: &AinStr) {
-        self.vec.reserve(string.len());
-        self.vec.splice(idx..idx, string.into_iter().copied());
+    pub const fn len(&self) -> usize {
+        self.vec.len()
+    }
+
+    /// Returns true if the ASCII string contains zero bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::{ain, AinString};
+    /// let mut s = AinString::new();
+    /// assert!(s.is_empty());
+    /// s.push(ain!('a'));
+    /// assert!(!s.is_empty());
+    /// ```
+    #[must_use]
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.vec.is_empty()
     }
 
     /// Returns the number of bytes that this ASCII string buffer can hold without reallocating.
@@ -203,12 +266,12 @@ impl AinString {
     /// # Examples
     /// ```
     /// # use ain::AinString;
-    /// let s = String::with_capacity(10);
+    /// let s = AinString::with_capacity(10);
     /// assert!(s.capacity() >= 10);
     /// ```
-    #[inline]
     #[must_use]
-    pub fn capacity(&self) -> usize {
+    #[inline]
+    pub const fn capacity(&self) -> usize {
         self.vec.capacity()
     }
 
@@ -248,7 +311,6 @@ impl AinString {
     /// assert!(s.capacity() >= 10);
     /// ```
     #[inline]
-
     pub fn reserve_exact(&mut self, additional: usize) {
         self.vec.reserve_exact(additional);
     }
@@ -266,7 +328,6 @@ impl AinString {
     /// assert_eq!(s.capacity(), 3);
     /// ```
     #[inline]
-
     pub fn shrink_to_fit(&mut self) {
         self.vec.shrink_to_fit();
     }
@@ -275,17 +336,49 @@ impl AinString {
     ///
     /// # Examples
     /// ```
-    /// # use ain::{ AsciiChar, AinString};
-    /// let mut s = AinString::from_ascii("abc").unwrap();
-    /// s.push(AsciiChar::from_ascii('1').unwrap());
-    /// s.push(AsciiChar::from_ascii('2').unwrap());
-    /// s.push(AsciiChar::from_ascii('3').unwrap());
-    /// assert_eq!(s, "abc123");
+    /// # use ain::ain;
+    /// let mut s = ain!("abc").to_ain_string();
+    /// s.push(ain!('1'));
+    /// s.push(ain!('2'));
+    /// s.push(ain!('3'));
+    /// assert_eq!(s.as_str(), "abc123");
     /// ```
     #[inline]
-
     pub fn push(&mut self, ch: AinChar) {
         self.vec.push(ch);
+    }
+
+    /// Pushes the given ASCII string onto this ASCII string buffer.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::ain;
+    /// let mut s = ain!("foo").to_ain_string();
+    /// s.push_str(ain!("bar"));
+    /// assert_eq!(s.as_str(), "foobar");
+    /// ```
+    #[inline]
+    pub fn push_str(&mut self, string: &AinStr) {
+        self.vec.extend_from_slice(string.as_slice())
+    }
+
+    /// Inserts the given ASCII string at the given place in this ASCII string buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx` is larger than the `AinString`'s length.
+    ///
+    /// # Examples
+    /// ```
+    /// # use ain::ain;
+    /// let mut s = ain!("abc").to_ain_string();
+    /// s.insert_str(1, ain!("def"));
+    /// assert_eq!(s.as_str(), "adefbc");
+    /// ```
+    #[inline]
+    pub fn insert_str(&mut self, idx: usize, string: &AinStr) {
+        self.vec.reserve(string.len());
+        self.vec.splice(idx..idx, string.chars());
     }
 
     /// Shortens a ASCII string to the specified length.
@@ -295,13 +388,12 @@ impl AinString {
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinString;
-    /// let mut s = AinString::from_ascii("hello").unwrap();
+    /// # use ain::ain;
+    /// let mut s = ain!("hello").to_ain_string();
     /// s.truncate(2);
-    /// assert_eq!(s, "he");
+    /// assert_eq!(s, ain!("he"));
     /// ```
     #[inline]
-
     pub fn truncate(&mut self, new_len: usize) {
         self.vec.truncate(new_len);
     }
@@ -311,15 +403,14 @@ impl AinString {
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinString;
-    /// let mut s = AinString::from_ascii("foo").unwrap();
-    /// assert_eq!(s.pop().map(|c| c.as_char()), Some('o'));
-    /// assert_eq!(s.pop().map(|c| c.as_char()), Some('o'));
-    /// assert_eq!(s.pop().map(|c| c.as_char()), Some('f'));
+    /// # use ain::ain;
+    /// let mut s = ain!("foo").to_ain_string();
+    /// assert_eq!(s.pop().map(|c| c.to_char()), Some('o'));
+    /// assert_eq!(s.pop().map(|c| c.to_char()), Some('o'));
+    /// assert_eq!(s.pop().map(|c| c.to_char()), Some('f'));
     /// assert_eq!(s.pop(), None);
     /// ```
     #[inline]
-    #[must_use]
     pub fn pop(&mut self) -> Option<AinChar> {
         self.vec.pop()
     }
@@ -334,14 +425,13 @@ impl AinString {
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinString;
-    /// let mut s = AinString::from_ascii("foo").unwrap();
-    /// assert_eq!(s.remove(0).as_char(), 'f');
-    /// assert_eq!(s.remove(1).as_char(), 'o');
-    /// assert_eq!(s.remove(0).as_char(), 'o');
+    /// # use ain::ain;
+    /// let mut s = ain!("foo").to_ain_string();
+    /// assert_eq!(s.remove(0).to_char(), 'f');
+    /// assert_eq!(s.remove(1).to_char(), 'o');
+    /// assert_eq!(s.remove(0).to_char(), 'o');
     /// ```
     #[inline]
-    #[must_use]
     pub fn remove(&mut self, idx: usize) -> AinChar {
         self.vec.remove(idx)
     }
@@ -356,70 +446,35 @@ impl AinString {
     ///
     /// # Examples
     /// ```
-    /// # use ain::{AinString,AsciiChar};
-    /// let mut s = AinString::from_ascii("foo").unwrap();
-    /// s.insert(2, AsciiChar::b);
-    /// assert_eq!(s, "fobo");
+    /// # use ain::ain;
+    /// let mut s = ain!("foo").to_ain_string();
+    /// s.insert(2, ain!('b'));
+    /// assert_eq!(s.as_str(), "fobo");
     /// ```
     #[inline]
-
     pub fn insert(&mut self, idx: usize, ch: AinChar) {
         self.vec.insert(idx, ch);
-    }
-
-    /// Returns the number of bytes in this ASCII string.
-    ///
-    /// # Examples
-    /// ```
-    /// # use ain::AinString;
-    /// let s = AinString::from_ascii("foo").unwrap();
-    /// assert_eq!(s.len(), 3);
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.vec.len()
-    }
-
-    /// Returns true if the ASCII string contains zero bytes.
-    ///
-    /// # Examples
-    /// ```
-    /// # use ain::{AsciiChar, AinString};
-    /// let mut s = AinString::new();
-    /// assert!(s.is_empty());
-    /// s.push(AsciiChar::from_ascii('a').unwrap());
-    /// assert!(!s.is_empty());
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Truncates the ASCII string, setting length (but not capacity) to zero.
     ///
     /// # Examples
     /// ```
-    /// # use ain::AinString;
-    /// let mut s = AinString::from_ascii("foo").unwrap();
+    /// # use ain::ain;
+    /// let mut s = ain!("foo").to_ain_string();
     /// s.clear();
     /// assert!(s.is_empty());
     /// ```
     #[inline]
-
     pub fn clear(&mut self) {
         self.vec.clear();
     }
 
-    /// Converts this [`AinString`] into a [`Box`]`<`[`AinStr`]`>`.
-    ///
-    /// This will drop any excess capacity
-    #[inline]
-    #[must_use]
-    pub fn into_boxed_ain_str(self) -> Box<AinStr> {
-        let slice = self.vec.into_boxed_slice();
-        Box::from(slice)
+    /// Consume this AinString producing an iterator over its characters.
+    pub fn into_chars(self) -> IntoChars {
+        IntoChars {
+            inner: self.vec.into_iter(),
+        }
     }
 }
 
@@ -428,178 +483,147 @@ impl Deref for AinString {
 
     #[inline]
     fn deref(&self) -> &AinStr {
-        self.vec.as_slice().as_ref()
+        self.as_ain_str()
     }
 }
 
 impl DerefMut for AinString {
     #[inline]
     fn deref_mut(&mut self) -> &mut AinStr {
-        self.vec.as_mut_slice().as_mut()
+        self.as_mut_ain_str()
+    }
+}
+
+impl fmt::Debug for AinString {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ain_str(), f)
+    }
+}
+
+impl fmt::Display for AinString {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.as_ain_str(), f)
+    }
+}
+
+impl Hash for AinString {
+    #[inline]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        // Just delegate to the vec. This is identical to the derived hash impl, but makes clippy
+        // happy because we override PartialEq.
+        self.vec.hash(state)
+    }
+}
+
+impl PartialEq for AinString {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        PartialEq::eq(self.as_ain_str(), other.as_ain_str())
+    }
+}
+
+impl PartialOrd for AinString {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(Ord::cmp(self, other))
+    }
+}
+
+impl Ord for AinString {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        Ord::cmp(self.as_ain_str(), other.as_ain_str())
     }
 }
 
 macro_rules! impl_eq {
-    ($lhs:ty, $rhs:ty) => {
+    (@byval $lhs:ty, $rhs:ty) => {
+        impl PartialEq<$rhs> for $lhs {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                PartialEq::eq(&**self, other)
+            }
+        }
+
+        impl PartialEq<$lhs> for $rhs {
+            #[inline]
+            fn eq(&self, other: &$lhs) -> bool {
+                PartialEq::eq(self, &**other)
+            }
+        }
+
+        impl PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                PartialOrd::partial_cmp(&**self, other)
+            }
+        }
+
+        impl PartialOrd<$lhs> for $rhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$lhs) -> Option<Ordering> {
+                PartialOrd::partial_cmp(self, &**other)
+            }
+        }
+    };
+    (@byref $lhs:ty, $rhs:ty) => {
         impl PartialEq<$rhs> for $lhs {
             #[inline]
             fn eq(&self, other: &$rhs) -> bool {
                 PartialEq::eq(&**self, &**other)
             }
         }
+
+        impl PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                PartialOrd::partial_cmp(&**self, &**other)
+            }
+        }
     };
 }
 
-impl_eq! { &AinStr, AinString }
-impl_eq! { AinString, &AinStr }
+impl_eq! { @byval Vec<AinChar>, AinStr }
+impl_eq! { @byref Vec<AinChar>, AinString }
+impl_eq! { @byref AinString, Vec<AinChar> }
 
-impl Borrow<AinStr> for AinString {
+impl_eq! { @byval AinString, AinStr }
+impl_eq! { @byref &AinStr, AinString }
+impl_eq! { @byref AinString, &AinStr }
+
+impl_eq! { @byval AinString, [AinChar] }
+impl_eq! { @byref &[AinChar], AinString }
+impl_eq! { @byref AinString, &[AinChar] }
+
+impl_eq! { @byval Cow<'_, AinStr>, AinStr }
+impl_eq! { @byref AinString, Cow<'_, AinStr> }
+impl_eq! { @byref Cow<'_, AinStr>, AinString }
+impl_eq! { @byref &AinStr, Cow<'_, AinStr> }
+impl_eq! { @byref Cow<'_, AinStr>, &AinStr }
+
+impl<S> Index<S> for AinString
+where
+    S: SliceIndex<[AinChar]>,
+    S::Output: AinSliceIndexOutputMap + 'static,
+{
+    type Output = <S::Output as AinSliceIndexOutputMap>::Output;
+
     #[inline]
-    fn borrow(&self) -> &AinStr {
-        &**self
+    fn index(&self, index: S) -> &Self::Output {
+        &self.as_ain_str()[index]
     }
 }
 
-impl BorrowMut<AinStr> for AinString {
+impl<S> IndexMut<S> for AinString
+where
+    S: SliceIndex<[AinChar]>,
+    S::Output: AinSliceIndexOutputMap + 'static,
+{
     #[inline]
-    fn borrow_mut(&mut self) -> &mut AinStr {
-        &mut **self
-    }
-}
-
-impl From<Vec<AinChar>> for AinString {
-    #[inline]
-    fn from(vec: Vec<AinChar>) -> Self {
-        AinString { vec }
-    }
-}
-
-impl From<AinChar> for AinString {
-    #[inline]
-    fn from(ch: AinChar) -> Self {
-        AinString { vec: vec![ch] }
-    }
-}
-
-impl From<AinString> for Vec<u8> {
-    fn from(s: AinString) -> Vec<u8> {
-        // SAFETY: All ascii bytes are valid `u8`, as we are `repr(u8)`.
-        // Note: We forget `self` to avoid `self.vec` from being deallocated.
-        let (ptr, len, cap) = s.vec.into_raw_parts();
-        let ptr = ptr.cast::<u8>();
-
-        // SAFETY: We guarantee all invariants due to getting `ptr`, `length`
-        //         and `capacity` from a `Vec`. We also guarantee `ptr` is valid
-        //         due to the `SAFETY` block above.
-        unsafe { Vec::from_raw_parts(ptr, len, cap) }
-    }
-}
-
-impl From<AinString> for AsciiString {
-    #[inline]
-    fn from(s: AinString) -> AsciiString {
-        let vec: Vec<u8> = s.into();
-        // SAFETY: AinString is always valid Ascii
-        unsafe { AsciiString::from_ascii_unchecked(vec) }
-    }
-}
-
-impl From<AsciiString> for AinString {
-    #[inline]
-    fn from(s: AsciiString) -> AinString {
-        let vec: Vec<u8> = s.into();
-        // SAFETY: AinString is always valid Ascii
-        unsafe { AinString::from_ascii_unchecked(vec) }
-    }
-}
-
-impl From<AinString> for Vec<AinChar> {
-    fn from(s: AinString) -> Vec<AinChar> {
-        s.vec
-    }
-}
-
-impl<'a> From<&'a AinStr> for AinString {
-    #[inline]
-    fn from(s: &'a AinStr) -> Self {
-        s.to_ain_string()
-    }
-}
-
-impl<'a> From<&'a [AinChar]> for AinString {
-    #[inline]
-    fn from(s: &'a [AinChar]) -> AinString {
-        s.iter().copied().collect()
-    }
-}
-
-impl From<AinString> for String {
-    #[inline]
-    fn from(s: AinString) -> String {
-        // SAFETY: All ascii bytes are `utf8`.
-        unsafe { String::from_utf8_unchecked(s.into()) }
-    }
-}
-
-impl From<Box<AinStr>> for AinString {
-    #[inline]
-    fn from(boxed: Box<AinStr>) -> Self {
-        boxed.into_ain_string()
-    }
-}
-
-impl From<AinString> for Box<AinStr> {
-    #[inline]
-    fn from(string: AinString) -> Self {
-        string.into_boxed_ain_str()
-    }
-}
-
-impl From<AinString> for Rc<AinStr> {
-    fn from(s: AinString) -> Rc<AinStr> {
-        let var: Rc<[AinChar]> = s.vec.into();
-        // SAFETY: AinStr is repr(transparent) and thus has the same layout as [AinChar]
-        unsafe { Rc::from_raw(Rc::into_raw(var) as *const AinStr) }
-    }
-}
-
-impl From<AinString> for Arc<AinStr> {
-    fn from(s: AinString) -> Arc<AinStr> {
-        let var: Arc<[AinChar]> = s.vec.into();
-        // SAFETY: AinStr is repr(transparent) and thus has the same layout as [AinChar]
-        unsafe { Arc::from_raw(Arc::into_raw(var) as *const AinStr) }
-    }
-}
-
-impl<'a> From<Cow<'a, AinStr>> for AinString {
-    fn from(cow: Cow<'a, AinStr>) -> AinString {
-        cow.into_owned()
-    }
-}
-
-impl From<AinString> for Cow<'static, AinStr> {
-    fn from(string: AinString) -> Cow<'static, AinStr> {
-        Cow::Owned(string)
-    }
-}
-
-impl<'a> From<&'a AinStr> for Cow<'a, AinStr> {
-    fn from(s: &'a AinStr) -> Cow<'a, AinStr> {
-        Cow::Borrowed(s)
-    }
-}
-
-impl AsRef<AinStr> for AinString {
-    #[inline]
-    fn as_ref(&self) -> &AinStr {
-        &**self
-    }
-}
-
-impl AsRef<[AinChar]> for AinString {
-    #[inline]
-    fn as_ref(&self) -> &[AinChar] {
-        &self.vec
+    fn index_mut(&mut self, index: S) -> &mut Self::Output {
+        &mut self.as_mut_ain_str()[index]
     }
 }
 
@@ -610,6 +634,22 @@ impl AsRef<[u8]> for AinString {
     }
 }
 
+impl From<AinString> for Vec<u8> {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        value.into_bytes()
+    }
+}
+
+impl TryFrom<Vec<u8>> for AinString {
+    type Error = AinStringFromError<Vec<u8>>;
+
+    #[inline]
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::from_ascii(value)
+    }
+}
+
 impl AsRef<str> for AinString {
     #[inline]
     fn as_ref(&self) -> &str {
@@ -617,65 +657,202 @@ impl AsRef<str> for AinString {
     }
 }
 
+impl From<AinString> for String {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        value.into_string()
+    }
+}
+
+impl TryFrom<String> for AinString {
+    type Error = AinStringFromError<String>;
+
+    #[inline]
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::from_string(value)
+    }
+}
+
+impl AsRef<AinStr> for AinString {
+    #[inline]
+    fn as_ref(&self) -> &AinStr {
+        self.as_ain_str()
+    }
+}
+
 impl AsMut<AinStr> for AinString {
     #[inline]
     fn as_mut(&mut self) -> &mut AinStr {
-        &mut *self
+        self.as_mut_ain_str()
+    }
+}
+
+borrow_from_as_ref!(AinString, AinStr);
+
+impl AsRef<[AinChar]> for AinString {
+    #[inline]
+    fn as_ref(&self) -> &[AinChar] {
+        self.as_slice()
     }
 }
 
 impl AsMut<[AinChar]> for AinString {
     #[inline]
     fn as_mut(&mut self) -> &mut [AinChar] {
-        &mut self.vec
+        self.as_mut_slice()
+    }
+}
+
+borrow_from_as_ref!(AinString, [AinChar]);
+
+impl From<Vec<AinChar>> for AinString {
+    #[inline]
+    fn from(value: Vec<AinChar>) -> Self {
+        Self::from_vec(value)
+    }
+}
+
+impl From<AinString> for Vec<AinChar> {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        value.into_vec()
+    }
+}
+
+impl From<AinString> for Box<AinStr> {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        value.into_boxed_ain_str()
+    }
+}
+
+impl From<Box<AinStr>> for AinString {
+    #[inline]
+    fn from(value: Box<AinStr>) -> Self {
+        value.into_ain_string()
+    }
+}
+
+impl<'a> From<&'a AinString> for Cow<'a, AinStr> {
+    #[inline]
+    fn from(value: &'a AinString) -> Self {
+        Cow::Borrowed(value.as_ain_str())
+    }
+}
+
+impl From<AinString> for Cow<'static, AinStr> {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        Cow::Owned(value)
+    }
+}
+
+impl From<Cow<'_, AinStr>> for AinString {
+    #[inline]
+    fn from(value: Cow<AinStr>) -> Self {
+        value.into_owned()
+    }
+}
+
+impl From<AinString> for Arc<AinStr> {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        let arc: Arc<[AinChar]> = Arc::from(value.vec);
+        // SAFETY: [AinChar] and AinStr have the same repr.
+        let ptr = Arc::into_raw(arc) as *const AinStr;
+        unsafe { Arc::from_raw(ptr) }
+    }
+}
+
+impl From<AinString> for Rc<AinStr> {
+    #[inline]
+    fn from(value: AinString) -> Self {
+        let arc: Rc<[AinChar]> = Rc::from(value.vec);
+        // SAFETY: [AinChar] and AinStr have the same repr.
+        let ptr = Rc::into_raw(arc) as *const AinStr;
+        unsafe { Rc::from_raw(ptr) }
     }
 }
 
 impl FromStr for AinString {
-    type Err = AsAinStrError;
+    type Err = AinValidationError;
 
-    fn from_str(s: &str) -> Result<AinString, AsAinStrError> {
-        s.as_ain_str().map(AinStr::to_ain_string)
-    }
-}
-
-impl fmt::Display for AinString {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&**self, f)
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        AinStr::from_str(s).map(AinStr::to_ain_string)
     }
 }
 
-impl fmt::Debug for AinString {
+/// A possible error value when converting into an  `AinString` from a byte vector or string.
+/// It wraps an [`AinValidationError`] which you can get through the `validation_error()` method.
+///
+/// #Examples
+/// ```
+/// # use ain::AinString;
+/// let err = AinString::from_string("bø!".to_string()).unwrap_err();
+/// assert_eq!(err.validation_error().valid_up_to(), 1);
+/// assert_eq!(err.into_source(), "bø!".to_string());
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AinStringFromError<O> {
+    error: AinValidationError,
+    owner: O,
+}
+
+impl<O> AinStringFromError<O> {
+    /// Get the position of the first non-ASCII byte or character.
+    #[must_use]
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&**self, f)
+    pub fn validation_error(&self) -> AinValidationError {
+        self.error
+    }
+    /// Get back the original, unmodified type.
+    #[must_use]
+    #[inline]
+    pub fn into_source(self) -> O {
+        self.owner
     }
 }
+
+impl<O> fmt::Debug for AinStringFromError<O> {
+    #[inline]
+    fn fmt(&self, fmtr: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.error, fmtr)
+    }
+}
+
+impl<O> fmt::Display for AinStringFromError<O> {
+    #[inline]
+    fn fmt(&self, fmtr: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.error, fmtr)
+    }
+}
+
+// Note: We don't provide a source pointing to validation_error because ValidationError has the same
+// format as AinStringFromError, so providing a `source` would result in the same error appearing
+// twice in things like `anyhow`.
+impl<O> Error for AinStringFromError<O> {}
 
 /// Please note that the `std::fmt::Result` returned by these methods does not support
 /// transmission of an error other than that an error occurred.
 impl fmt::Write for AinString {
+    #[inline]
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        if let Ok(astr) = AinStr::from_ascii(s) {
-            self.push_str(astr);
-            Ok(())
-        } else {
-            Err(fmt::Error)
-        }
+        let astr = AinStr::from_str(s)?;
+        self.push_str(astr);
+        Ok(())
     }
 
+    #[inline]
     fn write_char(&mut self, c: char) -> fmt::Result {
-        if let Ok(achar) = AinChar::from_ascii(c) {
-            self.push(achar);
-            Ok(())
-        } else {
-            Err(fmt::Error)
-        }
+        let achar = AinChar::from_char(c).ok_or(fmt::Error)?;
+        self.push(achar);
+        Ok(())
     }
 }
 
 impl<A: AsRef<AinStr>> FromIterator<A> for AinString {
+    #[inline]
     fn from_iter<I: IntoIterator<Item = A>>(iter: I) -> AinString {
         let mut buf = AinString::new();
         buf.extend(iter);
@@ -683,7 +860,11 @@ impl<A: AsRef<AinStr>> FromIterator<A> for AinString {
     }
 }
 
+/// Extends an [`AinString`] from an iterator of any type that supports [`AsRef<AinStr>`].
+///
+/// NOTE: For AinStr and slices of AinChar, it is more efficient to call push_str.
 impl<A: AsRef<AinStr>> Extend<A> for AinString {
+    #[inline]
     fn extend<I: IntoIterator<Item = A>>(&mut self, iterable: I) {
         let iterator = iterable.into_iter();
         let (lower_bound, _) = iterator.size_hint();
@@ -694,7 +875,7 @@ impl<A: AsRef<AinStr>> Extend<A> for AinString {
     }
 }
 
-impl<'a> Add<&'a AinStr> for AinString {
+impl Add<&AinStr> for AinString {
     type Output = AinString;
 
     #[inline]
@@ -704,91 +885,39 @@ impl<'a> Add<&'a AinStr> for AinString {
     }
 }
 
-impl<'a> AddAssign<&'a AinStr> for AinString {
+impl AddAssign<&AinStr> for AinString {
     #[inline]
     fn add_assign(&mut self, other: &AinStr) {
         self.push_str(other);
     }
 }
 
-#[allow(clippy::indexing_slicing)] // In `Index`, if it's out of bounds, panic is the default
-impl<T> Index<T> for AinString
-where
-    AinStr: Index<T>,
-{
-    type Output = <AinStr as Index<T>>::Output;
+impl<'a> IntoIterator for &'a AinString {
+    type Item = AinChar;
+    type IntoIter = Chars<'a>;
 
     #[inline]
-    fn index(&self, index: T) -> &<AinStr as Index<T>>::Output {
-        &(**self)[index]
+    fn into_iter(self) -> Self::IntoIter {
+        self.chars()
     }
 }
 
-#[allow(clippy::indexing_slicing)] // In `IndexMut`, if it's out of bounds, panic is the default
-impl<T> IndexMut<T> for AinString
-where
-    AinStr: IndexMut<T>,
-{
+impl<'a> IntoIterator for &'a mut AinString {
+    type Item = &'a mut AinChar;
+    type IntoIter = CharsMut<'a>;
+
     #[inline]
-    fn index_mut(&mut self, index: T) -> &mut <AinStr as Index<T>>::Output {
-        &mut (**self)[index]
+    fn into_iter(self) -> Self::IntoIter {
+        self.chars_mut()
     }
 }
 
-/// A possible error value when converting into an  `AinString` from a byte vector or string.
-/// It wraps an `AsAinStrError` which you can get through the `ain_error()` method.
-///
-/// This is the error type for `AinString::from_ascii()` and
-/// `IntoAinString::into_ain_string()`. They will never clone or touch the content of the
-/// original type; It can be extracted by the `into_source` method.
-///
-/// #Examples
-/// ```
-/// # use ain::IntoAinString;
-/// let err = "bø!".to_string().into_ascii_string().unwrap_err();
-/// assert_eq!(err.ascii_error().valid_up_to(), 1);
-/// assert_eq!(err.into_source(), "bø!".to_string());
-/// ```
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct IntoAinStringError<O> {
-    error: AsAinStrError,
-    owner: O,
-}
-impl<O> IntoAinStringError<O> {
-    /// Get the position of the first non-ASCII byte or character.
+impl IntoIterator for AinString {
+    type Item = AinChar;
+    type IntoIter = IntoChars;
+
     #[inline]
-    #[must_use]
-    pub fn ain_error(&self) -> AsAinStrError {
-        self.error
-    }
-    /// Get back the original, unmodified type.
-    #[inline]
-    #[must_use]
-    pub fn into_source(self) -> O {
-        self.owner
-    }
-}
-impl<O> fmt::Debug for IntoAinStringError<O> {
-    #[inline]
-    fn fmt(&self, fmtr: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(&self.error, fmtr)
-    }
-}
-impl<O> fmt::Display for IntoAinStringError<O> {
-    #[inline]
-    fn fmt(&self, fmtr: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.error, fmtr)
-    }
-}
-#[cfg(feature = "std")]
-impl<O: Any> Error for IntoAinStringError<O> {
-    #[inline]
-    #[allow(deprecated)] // TODO: Remove deprecation once the earliest version we support deprecates this method.
-    fn description(&self) -> &str {
-        self.error.description()
-    }
-    /// Always returns an `AsAinStrError`
-    fn cause(&self) -> Option<&dyn Error> {
-        Some(&self.error as &dyn Error)
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_chars()
     }
 }

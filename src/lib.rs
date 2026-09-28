@@ -11,8 +11,9 @@
 
 //! # ASCII Insensitive
 //!
-//! This crate provides a wrapper for ASCII strings, based on the [ascii] crate, but with
-//! case-insensitive comparisons by default.
+//! This crate provides ASCII chars and string, similar to the
+//! [`ascii`](https://crates.io/crates/ascii) crate, but with case-insensitive comparisons by
+//! default.
 //!
 //! This allows you to store strings in containers like maps while allowing case-insensitive
 //! lookups.
@@ -22,21 +23,45 @@
 //! *   [`AinString`]: an owning container like [`String`]
 //! *   [`AinStr`]: a borrowed slice like [`str`]
 //! *   [`AinChar`]: an individual element like [`char`]
+//!
+//! [`AinStr`] and [`AinChar`] constants can be created from literals using the [`ain!`] macro:
+//!
+//! ```
+//! # use ain::{ain, AinStr, AinChar};
+//! const STR: &'static AinStr = ain!("Hello World");
+//! // assert!(STR.contains("hello"));
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "nightly", feature(ascii_char))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(feature = "alloc")]
-#[macro_use]
 extern crate alloc;
-#[cfg(feature = "std")]
-extern crate core;
+
+#[macro_use]
+mod macros;
+
+#[doc(hidden)]
+pub use macros::Literal;
 
 mod ain_char;
 mod ain_str;
 #[cfg(feature = "alloc")]
 mod ain_string;
-
-pub use ain_char::{AinChar, ToAinChar, ToAinCharError};
-pub use ain_str::{AinStr, AsAinStr, AsAinStrError, AsMutAinStr};
 #[cfg(feature = "alloc")]
-pub use ain_string::{AinString, IntoAinStringError};
+mod alloc_conversions;
+#[cfg(feature = "ascii")]
+mod ascii_conversions;
+pub mod iter;
+#[cfg(feature = "nightly")]
+mod nightly_conversions;
+pub mod pattern;
+mod repr;
+mod validation;
+
+pub use ain_char::{AinChar, TryIntoAinCharError};
+pub use ain_str::{AinSliceIndexOutputMap, AinStr};
+#[cfg(feature = "alloc")]
+pub use ain_string::{AinString, AinStringFromError};
+pub use validation::AinValidationError;
