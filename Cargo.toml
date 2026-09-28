@@ -2,6 +2,11 @@
 name = "ain"
 version = "0.1.0"
 edition = "2024"
+authors = ["Zachary Stewart <zachary.c.stewart@gmail.com>"]
+description = "Case-insensitive mirror of the `ascii` crate"
+reademe = "README.md"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/zstewar1/ain"
 
 [features]
 default = ["std"]
