@@ -37,6 +37,6 @@ mod ain_str;
 mod ain_string;
 
 pub use ain_char::{AinChar, ToAinChar, ToAinCharError};
-pub use ain_str::{AinStr, AsAinStrError, AsAinStr, AsMutAinStr};
+pub use ain_str::{AinStr, AsAinStr, AsAinStrError, AsMutAinStr};
 #[cfg(feature = "alloc")]
 pub use ain_string::{AinString, IntoAinStringError};

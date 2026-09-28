@@ -1,9 +1,9 @@
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::boxed::Box;
-use alloc::string::String;
 #[cfg(feature = "std")]
 use core::any::Any;
 use core::borrow::{Borrow, BorrowMut};

@@ -1,14 +1,11 @@
+#[cfg(feature = "alloc")]
+use alloc::{borrow::ToOwned, boxed::Box};
 use core::ops::{Index, IndexMut};
 use core::slice::{Iter, IterMut, SliceIndex};
 use core::{fmt, slice};
-#[cfg(feature = "alloc")]
-use alloc::{
-    boxed::Box,
-    borrow::ToOwned,
-};
 
 pub use ascii::AsAsciiStrError as AsAinStrError;
-use ascii::{AsciiChar, AsAsciiStr, AsMutAsciiStr, AsciiStr};
+use ascii::{AsAsciiStr, AsMutAsciiStr, AsciiChar, AsciiStr};
 
 use crate::AinChar;
 #[cfg(feature = "alloc")]
