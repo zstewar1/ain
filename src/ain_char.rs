@@ -2,451 +2,400 @@ use core::cmp::Ordering;
 use core::hash::{Hash, Hasher};
 use core::{fmt, mem};
 
-pub use ascii::ToAsciiCharError as ToAinCharError;
-use ascii::{AsciiChar, ToAsciiChar};
+use crate::AinStr;
 
-/// Wrapper which makes an [AsciiChar] have case-insensitive comparisons.
+/// An ASCII-only character that is natively case-insensitive. Mimics the unstable standard library
+/// type [std::ascii::Char].
 ///
-/// This type is `repr(transparent)` with [AsciiChar].
+/// This type is `repr(u8)`.
 ///
-/// Since the range of allowed values is exactly the same as `AsciiChar` it is always safe to
-/// convert between them bidirectionally.
+/// Unlike other character types, we don't allow comparisons with case-sensitive types including u8
+/// and char because case handling could be ambiguous and would break transitive equality. E.g. `'a'
+/// == AinChar::SmallA`, `AinChar::SmallA == AinChar::CapitalA`, and `AinChar::CapitalA == 'A'`
+/// would be true regardless of how we handled equality, but `'a' != 'A'` even though every equality
+/// step in the middle is true.
 ///
-/// Unlike `AsciiChar`, we don't allow comparisons between `AinChar` and `char` or `u8` because it
-/// is unclear whether comparisons would be case insensitive or not. Either option would break
-/// transitive equality.
+/// For Ord, the 'case insensitive' order is to treat all characters as uppercase. This affects the
+/// sort order of letters relative to the following symbols, which lie between uppercase and
+/// lowercase ascii: `` [\]^_` ``
 #[derive(Default, Copy, Clone, Eq)]
-#[repr(transparent)]
-pub struct AinChar(AsciiChar);
+pub enum AinChar {
+    /// U+0000 (The default variant)
+    #[default]
+    Null = 0,
+    /// U+0001
+    StartOfHeading = 1,
+    /// U+0002
+    StartOfText = 2,
+    /// U+0003
+    EndOfText = 3,
+    /// U+0004
+    EndOfTransmission = 4,
+    /// U+0005
+    Enquiry = 5,
+    /// U+0006
+    Acknowledge = 6,
+    /// U+0007
+    Bell = 7,
+    /// U+0008
+    Backspace = 8,
+    /// U+0009
+    CharacterTabulation = 9,
+    /// U+000A
+    LineFeed = 10,
+    /// U+000B
+    LineTabulation = 11,
+    /// U+000C
+    FormFeed = 12,
+    /// U+000D
+    CarriageReturn = 13,
+    /// U+000E
+    ShiftOut = 14,
+    /// U+000F
+    ShiftIn = 15,
+    /// U+0010
+    DataLinkEscape = 16,
+    /// U+0011
+    DeviceControlOne = 17,
+    /// U+0012
+    DeviceControlTwo = 18,
+    /// U+0013
+    DeviceControlThree = 19,
+    /// U+0014
+    DeviceControlFour = 20,
+    /// U+0015
+    NegativeAcknowledge = 21,
+    /// U+0016
+    SynchronousIdle = 22,
+    /// U+0017
+    EndOfTransmissionBlock = 23,
+    /// U+0018
+    Cancel = 24,
+    /// U+0019
+    EndOfMedium = 25,
+    /// U+001A
+    Substitute = 26,
+    /// U+001B
+    Escape = 27,
+    /// U+001C
+    InformationSeparatorFour = 28,
+    /// U+001D
+    InformationSeparatorThree = 29,
+    /// U+001E
+    InformationSeparatorTwo = 30,
+    /// U+001F
+    InformationSeparatorOne = 31,
+    /// U+0020
+    Space = 32,
+    /// U+0021
+    ExclamationMark = 33,
+    /// U+0022
+    QuotationMark = 34,
+    /// U+0023
+    NumberSign = 35,
+    /// U+0024
+    DollarSign = 36,
+    /// U+0025
+    PercentSign = 37,
+    /// U+0026
+    Ampersand = 38,
+    /// U+0027
+    Apostrophe = 39,
+    /// U+0028
+    LeftParenthesis = 40,
+    /// U+0029
+    RightParenthesis = 41,
+    /// U+002A
+    Asterisk = 42,
+    /// U+002B
+    PlusSign = 43,
+    /// U+002C
+    Comma = 44,
+    /// U+002D
+    HyphenMinus = 45,
+    /// U+002E
+    FullStop = 46,
+    /// U+002F
+    Solidus = 47,
+    /// U+0030
+    Digit0 = 48,
+    /// U+0031
+    Digit1 = 49,
+    /// U+0032
+    Digit2 = 50,
+    /// U+0033
+    Digit3 = 51,
+    /// U+0034
+    Digit4 = 52,
+    /// U+0035
+    Digit5 = 53,
+    /// U+0036
+    Digit6 = 54,
+    /// U+0037
+    Digit7 = 55,
+    /// U+0038
+    Digit8 = 56,
+    /// U+0039
+    Digit9 = 57,
+    /// U+003A
+    Colon = 58,
+    /// U+003B
+    Semicolon = 59,
+    /// U+003C
+    LessThanSign = 60,
+    /// U+003D
+    EqualsSign = 61,
+    /// U+003E
+    GreaterThanSign = 62,
+    /// U+003F
+    QuestionMark = 63,
+    /// U+0040
+    CommercialAt = 64,
+    /// U+0041
+    CapitalA = 65,
+    /// U+0042
+    CapitalB = 66,
+    /// U+0043
+    CapitalC = 67,
+    /// U+0044
+    CapitalD = 68,
+    /// U+0045
+    CapitalE = 69,
+    /// U+0046
+    CapitalF = 70,
+    /// U+0047
+    CapitalG = 71,
+    /// U+0048
+    CapitalH = 72,
+    /// U+0049
+    CapitalI = 73,
+    /// U+004A
+    CapitalJ = 74,
+    /// U+004B
+    CapitalK = 75,
+    /// U+004C
+    CapitalL = 76,
+    /// U+004D
+    CapitalM = 77,
+    /// U+004E
+    CapitalN = 78,
+    /// U+004F
+    CapitalO = 79,
+    /// U+0050
+    CapitalP = 80,
+    /// U+0051
+    CapitalQ = 81,
+    /// U+0052
+    CapitalR = 82,
+    /// U+0053
+    CapitalS = 83,
+    /// U+0054
+    CapitalT = 84,
+    /// U+0055
+    CapitalU = 85,
+    /// U+0056
+    CapitalV = 86,
+    /// U+0057
+    CapitalW = 87,
+    /// U+0058
+    CapitalX = 88,
+    /// U+0059
+    CapitalY = 89,
+    /// U+005A
+    CapitalZ = 90,
+    /// U+005B
+    LeftSquareBracket = 91,
+    /// U+005C
+    ReverseSolidus = 92,
+    /// U+005D
+    RightSquareBracket = 93,
+    /// U+005E
+    CircumflexAccent = 94,
+    /// U+005F
+    LowLine = 95,
+    /// U+0060
+    GraveAccent = 96,
+    /// U+0061
+    SmallA = 97,
+    /// U+0062
+    SmallB = 98,
+    /// U+0063
+    SmallC = 99,
+    /// U+0064
+    SmallD = 100,
+    /// U+0065
+    SmallE = 101,
+    /// U+0066
+    SmallF = 102,
+    /// U+0067
+    SmallG = 103,
+    /// U+0068
+    SmallH = 104,
+    /// U+0069
+    SmallI = 105,
+    /// U+006A
+    SmallJ = 106,
+    /// U+006B
+    SmallK = 107,
+    /// U+006C
+    SmallL = 108,
+    /// U+006D
+    SmallM = 109,
+    /// U+006E
+    SmallN = 110,
+    /// U+006F
+    SmallO = 111,
+    /// U+0070
+    SmallP = 112,
+    /// U+0071
+    SmallQ = 113,
+    /// U+0072
+    SmallR = 114,
+    /// U+0073
+    SmallS = 115,
+    /// U+0074
+    SmallT = 116,
+    /// U+0075
+    SmallU = 117,
+    /// U+0076
+    SmallV = 118,
+    /// U+0077
+    SmallW = 119,
+    /// U+0078
+    SmallX = 120,
+    /// U+0079
+    SmallY = 121,
+    /// U+007A
+    SmallZ = 122,
+    /// U+007B
+    LeftCurlyBracket = 123,
+    /// U+007C
+    VerticalLine = 124,
+    /// U+007D
+    RightCurlyBracket = 125,
+    /// U+007E
+    Tilde = 126,
+    /// U+007F
+    Delete = 127,
+}
 
 impl fmt::Debug for AinChar {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        <AsciiChar as fmt::Debug>::fmt(&self.0, f)
+        fmt::Debug::fmt(&self.to_char(), f)
     }
 }
 
 impl fmt::Display for AinChar {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        <AsciiChar as fmt::Display>::fmt(&self.0, f)
+        fmt::Display::fmt(&self.to_char(), f)
     }
 }
 
 impl PartialEq for AinChar {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.0.eq_ignore_ascii_case(&other.0)
+        (*self).eq(*other)
     }
 }
 
 impl Hash for AinChar {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         // We normalize to uppercase since those are numerically lower and so sort before some
         // punctuation marks that normally end up before lowercase ascii.
-        self.0.to_ascii_uppercase().hash(state);
+        (*self as u8).to_ascii_uppercase().hash(state);
+    }
+
+    fn hash_slice<H: Hasher>(data: &[Self], state: &mut H) {
+        const BLOCK_SIZE: usize = 16;
+        let mut buf = [0u8; BLOCK_SIZE];
+        let (chunks, tail) = data.as_chunks::<BLOCK_SIZE>();
+        for chunk in chunks {
+            for idx in 0..BLOCK_SIZE {
+                buf[idx] = chunk[idx].to_u8().to_ascii_uppercase();
+            }
+            state.write(&buf);
+        }
+        if !tail.is_empty() {
+            for (idx, value) in tail.iter().enumerate() {
+                // tail.len() is always less than BLOCK_SIZE.
+                buf[idx] = value.to_u8().to_ascii_uppercase();
+            }
+            state.write(&buf[..tail.len()])
+        }
     }
 }
 
 impl PartialOrd for AinChar {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        Some(Ord::cmp(self, other))
     }
 }
 
 impl Ord for AinChar {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         // We normalize to uppercase since those are numerically lower and so sort before some
         // punctuation marks that normally end up before lowercase ascii.
-        self.0
-            .to_ascii_uppercase()
-            .cmp(&other.0.to_ascii_uppercase())
+        self.to_uppercase()
+            .to_u8()
+            .cmp(&other.to_uppercase().to_u8())
     }
-}
-
-impl From<AsciiChar> for AinChar {
-    #[inline]
-    fn from(value: AsciiChar) -> Self {
-        Self(value)
-    }
-}
-
-impl From<AinChar> for AsciiChar {
-    #[inline]
-    fn from(value: AinChar) -> Self {
-        value.0
-    }
-}
-
-impl From<AinChar> for char {
-    #[inline]
-    fn from(value: AinChar) -> Self {
-        value.to_char()
-    }
-}
-
-impl From<AinChar> for u8 {
-    #[inline]
-    fn from(value: AinChar) -> Self {
-        value.to_u8()
-    }
-}
-
-/// Defines constants for every character.
-#[allow(non_upper_case_globals)]
-impl AinChar {
-    /// `'\0'`
-    pub const Null: AinChar = AinChar(AsciiChar::Null);
-    /// [Start Of Heading](http://en.wikipedia.org/wiki/Start_of_Heading)
-    pub const SOH: AinChar = AinChar(AsciiChar::SOH);
-    /// [Start Of teXt](http://en.wikipedia.org/wiki/Start_of_Text)
-    pub const SOX: AinChar = AinChar(AsciiChar::SOX);
-    /// [End of TeXt](http://en.wikipedia.org/wiki/End-of-Text_character)
-    pub const ETX: AinChar = AinChar(AsciiChar::ETX);
-    /// [End Of Transmission](http://en.wikipedia.org/wiki/End-of-Transmission_character)
-    pub const EOT: AinChar = AinChar(AsciiChar::EOT);
-    /// [Enquiry](http://en.wikipedia.org/wiki/Enquiry_character)
-    pub const ENQ: AinChar = AinChar(AsciiChar::ENQ);
-    /// [Acknowledgement](http://en.wikipedia.org/wiki/Acknowledge_character)
-    pub const ACK: AinChar = AinChar(AsciiChar::ACK);
-    /// [bell / alarm / audible](http://en.wikipedia.org/wiki/Bell_character)
-    ///
-    /// `'\a'` is not recognized by Rust.
-    pub const Bell: AinChar = AinChar(AsciiChar::Bell);
-    /// [Backspace](http://en.wikipedia.org/wiki/Backspace)
-    ///
-    /// `'\b'` is not recognized by Rust.
-    pub const BackSpace: AinChar = AinChar(AsciiChar::BackSpace);
-    /// `'\t'`
-    pub const Tab: AinChar = AinChar(AsciiChar::Tab);
-    /// `'\n'`
-    pub const LineFeed: AinChar = AinChar(AsciiChar::LineFeed);
-    /// [Vertical tab](http://en.wikipedia.org/wiki/Vertical_Tab)
-    ///
-    /// `'\v'` is not recognized by Rust.
-    pub const VT: AinChar = AinChar(AsciiChar::VT);
-    /// [Form Feed](http://en.wikipedia.org/wiki/Form_Feed)
-    ///
-    /// `'\f'` is not recognized by Rust.
-    pub const FF: AinChar = AinChar(AsciiChar::FF);
-    /// `'\r'`
-    pub const CarriageReturn: AinChar = AinChar(AsciiChar::CarriageReturn);
-    /// [Shift In](http://en.wikipedia.org/wiki/Shift_Out_and_Shift_In_characters)
-    pub const SI: AinChar = AinChar(AsciiChar::SI);
-    /// [Shift Out](http://en.wikipedia.org/wiki/Shift_Out_and_Shift_In_characters)
-    pub const SO: AinChar = AinChar(AsciiChar::SO);
-    /// [Data Link Escape](http://en.wikipedia.org/wiki/Data_Link_Escape)
-    pub const DLE: AinChar = AinChar(AsciiChar::DLE);
-    /// [Device control 1, often XON](http://en.wikipedia.org/wiki/Device_Control_1)
-    pub const DC1: AinChar = AinChar(AsciiChar::DC1);
-    /// Device control 2
-    pub const DC2: AinChar = AinChar(AsciiChar::DC2);
-    /// Device control 3, Often XOFF
-    pub const DC3: AinChar = AinChar(AsciiChar::DC3);
-    /// Device control 4
-    pub const DC4: AinChar = AinChar(AsciiChar::DC4);
-    /// [Negative AcKnowledgement](http://en.wikipedia.org/wiki/Negative-acknowledge_character)
-    pub const NAK: AinChar = AinChar(AsciiChar::NAK);
-    /// [Synchronous idle](http://en.wikipedia.org/wiki/Synchronous_Idle)
-    pub const SYN: AinChar = AinChar(AsciiChar::SYN);
-    /// [End of Transmission Block](http://en.wikipedia.org/wiki/End-of-Transmission-Block_character)
-    pub const ETB: AinChar = AinChar(AsciiChar::ETB);
-    /// [Cancel](http://en.wikipedia.org/wiki/Cancel_character)
-    pub const CAN: AinChar = AinChar(AsciiChar::CAN);
-    /// [End of Medium](http://en.wikipedia.org/wiki/End_of_Medium)
-    pub const EM: AinChar = AinChar(AsciiChar::EM);
-    /// [Substitute](http://en.wikipedia.org/wiki/Substitute_character)
-    pub const SUB: AinChar = AinChar(AsciiChar::SUB);
-    /// [Escape](http://en.wikipedia.org/wiki/Escape_character)
-    ///
-    /// `'\e'` is not recognized by Rust.
-    pub const ESC: AinChar = AinChar(AsciiChar::ESC);
-    /// [File Separator](http://en.wikipedia.org/wiki/File_separator)
-    pub const FS: AinChar = AinChar(AsciiChar::FS);
-    /// [Group Separator](http://en.wikipedia.org/wiki/Group_separator)
-    pub const GS: AinChar = AinChar(AsciiChar::GS);
-    /// [Record Separator](http://en.wikipedia.org/wiki/Record_separator)
-    pub const RS: AinChar = AinChar(AsciiChar::RS);
-    /// [Unit Separator](http://en.wikipedia.org/wiki/Unit_separator)
-    pub const US: AinChar = AinChar(AsciiChar::US);
-    /// `' '`
-    pub const Space: AinChar = AinChar(AsciiChar::Space);
-    /// `'!'`
-    pub const Exclamation: AinChar = AinChar(AsciiChar::Exclamation);
-    /// `'"'`
-    pub const Quotation: AinChar = AinChar(AsciiChar::Quotation);
-    /// `'#'`
-    pub const Hash: AinChar = AinChar(AsciiChar::Hash);
-    /// `'$'`
-    pub const Dollar: AinChar = AinChar(AsciiChar::Dollar);
-    /// `'%'`
-    pub const Percent: AinChar = AinChar(AsciiChar::Percent);
-    /// `'&'`
-    pub const Ampersand: AinChar = AinChar(AsciiChar::Ampersand);
-    /// `'\''`
-    pub const Apostrophe: AinChar = AinChar(AsciiChar::Apostrophe);
-    /// `'('`
-    pub const ParenOpen: AinChar = AinChar(AsciiChar::ParenOpen);
-    /// `')'`
-    pub const ParenClose: AinChar = AinChar(AsciiChar::ParenClose);
-    /// `'*'`
-    pub const Asterisk: AinChar = AinChar(AsciiChar::Asterisk);
-    /// `'+'`
-    pub const Plus: AinChar = AinChar(AsciiChar::Plus);
-    /// `','`
-    pub const Comma: AinChar = AinChar(AsciiChar::Comma);
-    /// `'-'`
-    pub const Minus: AinChar = AinChar(AsciiChar::Minus);
-    /// `'.'`
-    pub const Dot: AinChar = AinChar(AsciiChar::Dot);
-    /// `'/'`
-    pub const Slash: AinChar = AinChar(AsciiChar::Slash);
-    /// `'0'`
-    pub const D0: AinChar = AinChar(AsciiChar::_0);
-    /// `'1'`
-    pub const D1: AinChar = AinChar(AsciiChar::_1);
-    /// `'2'`
-    pub const D2: AinChar = AinChar(AsciiChar::_2);
-    /// `'3'`
-    pub const D3: AinChar = AinChar(AsciiChar::_3);
-    /// `'4'`
-    pub const D4: AinChar = AinChar(AsciiChar::_4);
-    /// `'5'`
-    pub const D5: AinChar = AinChar(AsciiChar::_5);
-    /// `'6'`
-    pub const D6: AinChar = AinChar(AsciiChar::_6);
-    /// `'7'`
-    pub const D7: AinChar = AinChar(AsciiChar::_7);
-    /// `'8'`
-    pub const D8: AinChar = AinChar(AsciiChar::_8);
-    /// `'9'`
-    pub const D9: AinChar = AinChar(AsciiChar::_9);
-    /// `':'`
-    pub const Colon: AinChar = AinChar(AsciiChar::Colon);
-    /// `';'`
-    pub const Semicolon: AinChar = AinChar(AsciiChar::Semicolon);
-    /// `'<'`
-    pub const LessThan: AinChar = AinChar(AsciiChar::LessThan);
-    /// `'='`
-    pub const Equal: AinChar = AinChar(AsciiChar::Equal);
-    /// `'>'`
-    pub const GreaterThan: AinChar = AinChar(AsciiChar::GreaterThan);
-    /// `'?'`
-    pub const Question: AinChar = AinChar(AsciiChar::Question);
-    /// `'@'`
-    pub const At: AinChar = AinChar(AsciiChar::At);
-    /// `'A'`
-    pub const A: AinChar = AinChar(AsciiChar::A);
-    /// `'B'`
-    pub const B: AinChar = AinChar(AsciiChar::B);
-    /// `'C'`
-    pub const C: AinChar = AinChar(AsciiChar::C);
-    /// `'D'`
-    pub const D: AinChar = AinChar(AsciiChar::D);
-    /// `'E'`
-    pub const E: AinChar = AinChar(AsciiChar::E);
-    /// `'F'`
-    pub const F: AinChar = AinChar(AsciiChar::F);
-    /// `'G'`
-    pub const G: AinChar = AinChar(AsciiChar::G);
-    /// `'H'`
-    pub const H: AinChar = AinChar(AsciiChar::H);
-    /// `'I'`
-    pub const I: AinChar = AinChar(AsciiChar::I);
-    /// `'J'`
-    pub const J: AinChar = AinChar(AsciiChar::J);
-    /// `'K'`
-    pub const K: AinChar = AinChar(AsciiChar::K);
-    /// `'L'`
-    pub const L: AinChar = AinChar(AsciiChar::L);
-    /// `'M'`
-    pub const M: AinChar = AinChar(AsciiChar::M);
-    /// `'N'`
-    pub const N: AinChar = AinChar(AsciiChar::N);
-    /// `'O'`
-    pub const O: AinChar = AinChar(AsciiChar::O);
-    /// `'P'`
-    pub const P: AinChar = AinChar(AsciiChar::P);
-    /// `'Q'`
-    pub const Q: AinChar = AinChar(AsciiChar::Q);
-    /// `'R'`
-    pub const R: AinChar = AinChar(AsciiChar::R);
-    /// `'S'`
-    pub const S: AinChar = AinChar(AsciiChar::S);
-    /// `'T'`
-    pub const T: AinChar = AinChar(AsciiChar::T);
-    /// `'U'`
-    pub const U: AinChar = AinChar(AsciiChar::U);
-    /// `'V'`
-    pub const V: AinChar = AinChar(AsciiChar::V);
-    /// `'W'`
-    pub const W: AinChar = AinChar(AsciiChar::W);
-    /// `'X'`
-    pub const X: AinChar = AinChar(AsciiChar::X);
-    /// `'Y'`
-    pub const Y: AinChar = AinChar(AsciiChar::Y);
-    /// `'Z'`
-    pub const Z: AinChar = AinChar(AsciiChar::Z);
-    /// `'['`
-    pub const BracketOpen: AinChar = AinChar(AsciiChar::BracketOpen);
-    /// `'\'`
-    pub const BackSlash: AinChar = AinChar(AsciiChar::BackSlash);
-    /// `']'`
-    pub const BracketClose: AinChar = AinChar(AsciiChar::BracketClose);
-    /// `'^'`
-    pub const Caret: AinChar = AinChar(AsciiChar::Caret);
-    /// `'_'`
-    pub const UnderScore: AinChar = AinChar(AsciiChar::UnderScore);
-    /// `'`'`
-    pub const Grave: AinChar = AinChar(AsciiChar::Grave);
-    /// `'a'`
-    pub const a: AinChar = AinChar(AsciiChar::a);
-    /// `'b'`
-    pub const b: AinChar = AinChar(AsciiChar::b);
-    /// `'c'`
-    pub const c: AinChar = AinChar(AsciiChar::c);
-    /// `'d'`
-    pub const d: AinChar = AinChar(AsciiChar::d);
-    /// `'e'`
-    pub const e: AinChar = AinChar(AsciiChar::e);
-    /// `'f'`
-    pub const f: AinChar = AinChar(AsciiChar::f);
-    /// `'g'`
-    pub const g: AinChar = AinChar(AsciiChar::g);
-    /// `'h'`
-    pub const h: AinChar = AinChar(AsciiChar::h);
-    /// `'i'`
-    pub const i: AinChar = AinChar(AsciiChar::i);
-    /// `'j'`
-    pub const j: AinChar = AinChar(AsciiChar::j);
-    /// `'k'`
-    pub const k: AinChar = AinChar(AsciiChar::k);
-    /// `'l'`
-    pub const l: AinChar = AinChar(AsciiChar::l);
-    /// `'m'`
-    pub const m: AinChar = AinChar(AsciiChar::m);
-    /// `'n'`
-    pub const n: AinChar = AinChar(AsciiChar::n);
-    /// `'o'`
-    pub const o: AinChar = AinChar(AsciiChar::o);
-    /// `'p'`
-    pub const p: AinChar = AinChar(AsciiChar::p);
-    /// `'q'`
-    pub const q: AinChar = AinChar(AsciiChar::q);
-    /// `'r'`
-    pub const r: AinChar = AinChar(AsciiChar::r);
-    /// `'s'`
-    pub const s: AinChar = AinChar(AsciiChar::s);
-    /// `'t'`
-    pub const t: AinChar = AinChar(AsciiChar::t);
-    /// `'u'`
-    pub const u: AinChar = AinChar(AsciiChar::u);
-    /// `'v'`
-    pub const v: AinChar = AinChar(AsciiChar::v);
-    /// `'w'`
-    pub const w: AinChar = AinChar(AsciiChar::w);
-    /// `'x'`
-    pub const x: AinChar = AinChar(AsciiChar::x);
-    /// `'y'`
-    pub const y: AinChar = AinChar(AsciiChar::y);
-    /// `'z'`
-    pub const z: AinChar = AinChar(AsciiChar::z);
-    /// `'{'`
-    pub const CurlyBraceOpen: AinChar = AinChar(AsciiChar::CurlyBraceOpen);
-    /// `'|'`
-    pub const VerticalBar: AinChar = AinChar(AsciiChar::VerticalBar);
-    /// `'}'`
-    pub const CurlyBraceClose: AinChar = AinChar(AsciiChar::CurlyBraceClose);
-    /// `'~'`
-    pub const Tilde: AinChar = AinChar(AsciiChar::Tilde);
-    /// [Delete](http://en.wikipedia.org/wiki/Delete_character)
-    pub const DEL: AinChar = AinChar(AsciiChar::DEL);
 }
 
 impl AinChar {
-    /// Constructs an ASCII character from a `u8`, `char` or other character type.
-    ///
-    /// # Errors
-    /// Returns `Err(())` if the character can't be ASCII encoded.
-    ///
-    /// # Example
-    /// ```
-    /// # use ain::AinChar;
-    /// let a = AinChar::from_ascii('g').unwrap();
-    /// assert_eq!(a.to_char(), 'g');
-    /// ```
-    #[inline]
-    pub fn from_ascii<C: ToAinChar>(ch: C) -> Result<Self, ToAinCharError> {
-        ch.to_ain_char()
-    }
+    /// The character with the lowest ASCII code.
+    pub const MIN: Self = Self::Null;
 
-    /// Create an `AinChar` from a `char`, panicking if it's not ASCII.
-    ///
-    /// This function is intended for creating `AinChar` values from hardcoded known-good character
-    /// literals such as `'K'`, `'-'` or `'\0'`, and for use in `const` contexts. Use
-    /// [`from_ascii()`][Self::from_ascii] instead when you're not certain the character is ASCII.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use ain::AinChar;
-    /// assert_eq!(AinChar::new('@'), AinChar::At);
-    /// assert_eq!(AinChar::new('C').to_char(), 'C');
-    /// ```
-    ///
-    /// In a constant:
-    /// ```
-    /// # use ain::AinChar;
-    /// const SPLIT_ON: AinChar = AinChar::new(',');
-    /// ```
-    ///
-    /// This will not compile:
-    /// ```compile_fail
-    /// # use ain::AinChar;
-    /// const BAD: AinChar = AinChar::new('Ø');
-    /// ```
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if passed a non-ASCII character.
-    ///
-    /// The panic message might not be the most descriptive due to the current limitations of `const
-    /// fn`.
-    #[inline]
+    /// The character with the highest ASCII code.
+    pub const MAX: Self = Self::Delete;
+
+    /// Converts the given character to an AinChar if it is in range.
     #[must_use]
-    pub const fn new(ch: char) -> AinChar {
-        Self(AsciiChar::new(ch))
+    #[inline]
+    pub const fn from_char(ch: char) -> Option<Self> {
+        if ch <= Self::MAX.to_char() {
+            Some(unsafe { Self::from_u8_unchecked(ch as u8) })
+        } else {
+            None
+        }
     }
 
-    /// Constructs an ASCII character from a `u8`, `char` or othe rcharacter type without any
-    /// checks.
+    /// Converts a bytes aon an AinChar if it is in range.
+    #[must_use]
+    #[inline]
+    pub const fn from_u8(b: u8) -> Option<Self> {
+        if b <= Self::MAX.to_u8() {
+            // SAFETY: we just checked that the byte is in the valid range.
+            Some(unsafe { Self::from_u8_unchecked(b) })
+        } else {
+            None
+        }
+    }
+
+    /// Creates an ASCII character from the byte `b`, without checking whether it's valid.
     ///
     /// # Safety
     ///
-    /// This function is very unsafe as it can create invalid enum discriminants, which instantly
-    /// creates undefined behavior. (`let _ = AinChar::from_ascii_unchecked(200);` alone is UB).
-    ///
-    /// The undefined behavior is not just theoretical either: For example, `[0;
-    /// 128][AsciiChar::from_ascii_unchecked(255) as u8 as usize] = 0` might not panic, creating a
-    /// buffer overflow, and `Some(AinChar::from_ascii_unchecked(128))` might be `None`.
-    #[inline]
+    /// `b` must be in `0..=127`, or else this is UB.
     #[must_use]
-    pub unsafe fn from_ascii_unchecked<C: ToAinChar>(ch: C) -> Self {
-        // SAFETY: Caller guarantees `ch` is within bounds of ascii.
-        unsafe { ch.to_ain_char_unchecked() }
-    }
-
-    /// Const-fn variant of from_ascii_unchecked.
-    ///
-    /// # Safety
-    ///
-    /// ch must be < 128.
-    pub const unsafe fn from_byte_unchecked(ch: u8) -> Self {
-        // SAFETY: caller guarantees self is within the Ascii range.
-        unsafe { mem::transmute::<u8, Self>(ch) }
+    #[inline]
+    pub const unsafe fn from_u8_unchecked(b: u8) -> Self {
+        // The safety precondition is trivially verifiable, so we check it in debug builds.
+        debug_assert!(
+            b <= Self::MAX.to_u8(),
+            "`ain::AinChar::from_u8_unchecked` input cannot exceed 127.",
+        );
+        // SAFETY: Our safety precondition is that `b` is in-range.
+        unsafe { mem::transmute::<u8, Self>(b) }
     }
 
     /// Converts numbers 0-9 into the digit characters '0' - '9'
+    #[must_use]
+    #[inline]
     pub const fn digit(d: u8) -> Option<AinChar> {
         if d < 10 {
             // SAFETY: Just checked that the value is in range.
@@ -462,42 +411,51 @@ impl AinChar {
     /// # Safety
     ///
     /// Value must be less than 10.
+    #[must_use]
+    #[inline]
     pub const unsafe fn digit_unchecked(d: u8) -> AinChar {
         // SAFETY: `'0'` through `'9'` are U+00030 through U+0039, so because `d` must be less than
         // 10the addition can return at most 112 (0x70), which doesn't overflow and is within the
         // ASCII range.
         unsafe {
             let ch = b'0'.unchecked_add(d);
-            Self::from_byte_unchecked(ch)
+            Self::from_u8_unchecked(ch)
         }
     }
 
     /// Converts an ASCII character into a `u8`.
-    #[inline]
     #[must_use]
+    #[inline]
     pub const fn to_u8(self) -> u8 {
-        self.0.as_byte()
+        self as u8
     }
 
     /// Converts an ASCII character into a `char`.
-    #[inline]
     #[must_use]
+    #[inline]
     pub const fn to_char(self) -> char {
-        self.0.as_char()
+        self.to_u8() as char
     }
 
     /// Views this ASCII character as a one-character string.
+    #[must_use]
+    #[inline]
     pub const fn as_str(&self) -> &str {
-        let ptr: *const Self = self;
-        // We go through this step to avoid doing a pointer cast on a slice pointer.
-        // SAFETY: AinChar is repr(transpaent) to AsciiChar which is repr(u8), so casting to u8 is
-        // safe, as long as we don't allow mutation.
-        let byte_ptr = ptr.cast::<u8>();
-        // SAFETY: the ptr is valid for a read of 1 byte, and it comes from a ref so it must be
-        // non-null and properly aligned.
-        let slice = unsafe { core::slice::from_raw_parts(byte_ptr, 1) };
-        // SAFETY: The one byte slice is valid ascii, so it must be a valid str.
-        unsafe { str::from_utf8_unchecked(slice) }
+        self.as_ain_str().as_str()
+    }
+
+    /// View this AinChar as a single-character AinStr
+    #[must_use]
+    #[inline]
+    pub const fn as_ain_str(&self) -> &AinStr {
+        AinStr::from_slice(core::slice::from_ref(self))
+    }
+
+    /// View this AinChar as a mutable single-character AinStr
+    #[must_use]
+    #[inline]
+    pub const fn as_ain_str_mut(&mut self) -> &mut AinStr {
+        AinStr::from_mut_slice(core::slice::from_mut(self))
     }
 
     /// Maps letters a-z to A-Z and returns any other character unchanged.
@@ -515,9 +473,9 @@ impl AinChar {
     /// assert_eq!(AinChar::new('[').to_uppercase().to_char(), '[');
     /// ```
     #[inline]
-    #[must_use]
     pub const fn to_uppercase(self) -> Self {
-        Self(self.0.to_ascii_uppercase())
+        // SAFETY: case conversion does not make valid ascii into invalid ascii
+        unsafe { Self::from_u8_unchecked(self.to_u8().to_ascii_uppercase()) }
     }
 
     /// Maps letters A-Z to a-z and returns any other character unchanged.
@@ -535,32 +493,31 @@ impl AinChar {
     /// assert_eq!(AinChar::new('\x7f').to_lowercase().to_char(), '\x7f');
     /// ```
     #[inline]
-    #[must_use]
     pub const fn to_lowercase(self) -> Self {
-        Self(self.0.to_ascii_lowercase())
+        // SAFETY: case conversion does not make valid ascii into invalid ascii
+        unsafe { Self::from_u8_unchecked(self.to_u8().to_ascii_lowercase()) }
     }
 
     /// Replaces letters `a` to `z` with `A` to `Z`
     ///
     /// Note: because this type is case-insensitive, this does not change the equals or hash.
     #[inline]
-    pub fn make_uppercase(&mut self) {
-        self.0.make_ascii_uppercase()
+    pub const fn make_uppercase(&mut self) {
+        *self = self.to_uppercase()
     }
 
     /// Replaces letters `A` to `Z` with `a` to `z`
     ///
     /// Note: because this type is case-insensitive, this does not change the equals or hash.
     #[inline]
-    pub fn make_lowercase(&mut self) {
-        self.0.make_ascii_lowercase();
+    pub const fn make_lowercase(&mut self) {
+        *self = self.to_lowercase();
     }
 
     /// Check if the character is a letter (a-z, A-Z)
     #[inline]
-    #[must_use]
     pub const fn is_alphabetic(self) -> bool {
-        self.0.is_ascii_alphabetic()
+        self.to_u8().is_ascii_alphabetic()
     }
 
     /// Checks if the character is alphabetic and uppercase (A-Z).
@@ -573,25 +530,22 @@ impl AinChar {
     /// assert_eq!(AinChar::new('@').is_uppercase(), false);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_uppercase(self) -> bool {
-        self.0.is_ascii_uppercase()
+        self.to_u8().is_ascii_uppercase()
     }
 
     /// Checks if the character is alphabetic and lowercase (a-z).
     ///
     /// This method is identical to [`is_lowercase()`](#method.is_lowercase)
     #[inline]
-    #[must_use]
     pub const fn is_lowercase(self) -> bool {
-        self.0.is_ascii_lowercase()
+        self.to_u8().is_ascii_lowercase()
     }
 
     /// Check if the character is a letter or decimal digit.
     #[inline]
-    #[must_use]
     pub const fn is_alphanumeric(self) -> bool {
-        self.0.is_ascii_alphanumeric()
+        self.to_u8().is_ascii_alphanumeric()
     }
 
     /// Check if the character is a number (0-9)
@@ -606,9 +560,8 @@ impl AinChar {
     /// assert_eq!(AinChar::new('/').is_digit(), false);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_digit(self) -> bool {
-        self.0.is_ascii_digit()
+        self.to_u8().is_ascii_digit()
     }
 
     /// Checks if the character is a valid octal digit
@@ -624,7 +577,6 @@ impl AinChar {
     /// assert_eq!(AinChar::new(' ').is_octdigit(), false);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_octdigit(self) -> bool {
         self.is_digit() && self.to_u8() < b'8'
     }
@@ -641,9 +593,8 @@ impl AinChar {
     /// assert_eq!(AinChar::new(' ').is_hexdigit(), false);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_hexdigit(self) -> bool {
-        self.0.is_ascii_hexdigit()
+        self.to_u8().is_ascii_hexdigit()
     }
 
     /// Checks if the character is punctuation
@@ -657,9 +608,8 @@ impl AinChar {
     /// assert_eq!(AinChar::new('~').is_punctuation(), true);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_punctuation(self) -> bool {
-        self.0.is_ascii_punctuation()
+        self.to_u8().is_ascii_punctuation()
     }
 
     /// Checks if the character is printable (except space)
@@ -672,17 +622,15 @@ impl AinChar {
     /// assert_eq!(AinChar::new('\n').is_graphic(), false);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_graphic(self) -> bool {
-        self.0.is_ascii_graphic()
+        self.to_u8().is_ascii_graphic()
     }
 
     /// Check if the character one of ' ', '\t', '\n', '\r',
     /// '\0xb' (vertical tab) or '\0xc' (form feed).
     #[inline]
-    #[must_use]
     pub const fn is_whitespace(self) -> bool {
-        self.0.is_ascii_whitespace()
+        self.to_u8().is_ascii_whitespace()
     }
 
     /// Check if the character is a control character
@@ -698,50 +646,76 @@ impl AinChar {
     /// assert_eq!(AinChar::EOT.is_control(), true);
     /// ```
     #[inline]
-    #[must_use]
     pub const fn is_control(self) -> bool {
-        self.0.is_ascii_control()
+        self.to_u8().is_ascii_control()
+    }
+
+    /// Provides a const way to perform equality on AinChar values.
+    #[inline]
+    pub(crate) const fn eq(self, other: Self) -> bool {
+        self.to_u8().eq_ignore_ascii_case(&other.to_u8())
     }
 }
 
-/// Convert `char`, `u8` and other character types to `AsciiChar`.
-pub trait ToAinChar {
-    /// Convert to `AinChar`.
-    ///
-    /// # Errors
-    /// If `self` is outside the valid ascii range, this returns `Err`
-    fn to_ain_char(self) -> Result<AinChar, ToAinCharError>;
-
-    /// Convert to `AinChar` without checking that it is an ASCII character.
-    ///
-    /// # Safety
-    /// Calling this function with a value outside of the ascii range, `0x0` to `0x7f` inclusive,
-    /// is undefined behavior.
-    unsafe fn to_ain_char_unchecked(self) -> AinChar;
-}
-
-impl<C: ToAsciiChar> ToAinChar for C {
-    #[inline]
-    fn to_ain_char(self) -> Result<AinChar, ToAinCharError> {
-        self.to_ascii_char().map(AinChar)
-    }
-
-    #[inline]
-    unsafe fn to_ain_char_unchecked(self) -> AinChar {
-        // SAFETY: calling to_ascii_char_unchecked has the same contract as to_ain_char_unchecked.
-        AinChar(unsafe { self.to_ascii_char_unchecked() })
+impl AsRef<AinStr> for AinChar {
+    fn as_ref(&self) -> &AinStr {
+        self.as_ain_str()
     }
 }
 
-impl ToAsciiChar for AinChar {
-    #[inline]
-    fn to_ascii_char(self) -> Result<AsciiChar, ToAinCharError> {
-        Ok(self.0)
+impl AsMut<AinStr> for AinChar {
+    fn as_mut(&mut self) -> &mut AinStr {
+        self.as_ain_str_mut()
     }
+}
 
+impl AsRef<str> for AinChar {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<AinChar> for char {
     #[inline]
-    unsafe fn to_ascii_char_unchecked(self) -> AsciiChar {
-        self.0
+    fn from(value: AinChar) -> Self {
+        value.to_char()
+    }
+}
+
+impl From<AinChar> for u8 {
+    #[inline]
+    fn from(value: AinChar) -> Self {
+        value.to_u8()
+    }
+}
+
+/// Error used for [TryFrom]/[TryInto] implementations for [AinChar].
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct TryIntoAinCharError {
+    _private: (),
+}
+
+impl fmt::Display for TryIntoAinCharError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Input was not a valid ASCII character")
+    }
+}
+
+impl core::error::Error for TryIntoAinCharError {}
+
+impl TryFrom<u8> for AinChar {
+    type Error = TryIntoAinCharError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_u8(value).ok_or(TryIntoAinCharError { _private: () })
+    }
+}
+
+impl TryFrom<char> for AinChar {
+    type Error = TryIntoAinCharError;
+
+    fn try_from(value: char) -> Result<Self, Self::Error> {
+        Self::from_char(value).ok_or(TryIntoAinCharError { _private: () })
     }
 }
 
@@ -755,7 +729,7 @@ mod tests {
     fn hash_case_independent() {
         let mut set = HashSet::new();
         for ch in '\0'..='\x7f' {
-            let inch = AinChar::new(ch);
+            let inch = AinChar::from_char(ch).unwrap();
             // ASCII lowercase is higher than lowercase, so we expect the lowercase letters to all
             // be skipped.
             if ch.is_ascii_lowercase() {
@@ -772,7 +746,7 @@ mod tests {
     fn cmp_case_independent() {
         let mut set = BTreeSet::new();
         for ch in '\0'..='\x7f' {
-            let inch = AinChar::new(ch);
+            let inch = AinChar::from_char(ch).unwrap();
             // ASCII lowercase is higher than lowercase, so we expect the lowercase letters to all
             // be skipped.
             if ch.is_ascii_lowercase() {

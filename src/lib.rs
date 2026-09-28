@@ -24,19 +24,70 @@
 //! *   [`AinChar`]: an individual element like [`char`]
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "nightly", feature(ascii_char))]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 #[cfg(feature = "alloc")]
-#[macro_use]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate core;
+
+macro_rules! borrow_from_as_ref {
+    ($from:ty, $to:ty) => {
+        borrow_from_as_ref!(const $from, $to);
+        borrow_from_as_ref!(mut $from, $to);
+    };
+    (const $from:ty, $to:ty) => {
+        impl Borrow<$to> for $from {
+            fn borrow(&self) -> &$to {
+                self.as_ref()
+            }
+        }
+    };
+    (mut $from:ty, $to:ty) => {
+        impl BorrowMut<$to> for $from {
+            fn borrow_mut(&mut self) -> &mut $to {
+                self.as_mut()
+            }
+        }
+    };
+}
+
+macro_rules! from_ref_from_as_ref {
+    ($from:ty, $to:ty) => {
+        from_ref_from_as_ref!(const $from, $to);
+        from_ref_from_as_ref!(mut $from, $to);
+    };
+    (const $from:ty, $to:ty) => {
+        impl<'a> From<&'a $from> for &'a $to {
+            fn from(value: &$from) -> &$to {
+                value.as_ref()
+            }
+        }
+    };
+    (mut $from:ty, $to:ty) => {
+        impl<'a> From<&'a mut $from> for &'a mut $to {
+            fn from(value: &mut $from) -> &mut $to {
+                value.as_mut()
+            }
+        }
+    };
+}
 
 mod ain_char;
 mod ain_str;
 #[cfg(feature = "alloc")]
 mod ain_string;
+#[cfg(feature = "alloc")]
+mod alloc_conversions;
+#[cfg(feature = "ascii")]
+mod ascii_conversions;
+#[cfg(feature = "nightly")]
+mod nightly_conversions;
+mod validation;
 
-pub use ain_char::{AinChar, ToAinChar, ToAinCharError};
-pub use ain_str::{AinStr, AsAinStr, AsAinStrError, AsMutAinStr};
+pub use ain_char::{AinChar, TryIntoAinCharError};
+pub use ain_str::{AinSliceIndexOutputMap, AinStr, Lines, Split, SplitMut};
 #[cfg(feature = "alloc")]
 pub use ain_string::{AinString, IntoAinStringError};
+pub use validation::AinValidationError;
