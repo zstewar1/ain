@@ -25,6 +25,8 @@ pub struct AinStr {
 
 // This is mostly copied from ascii::AsciiStr.
 impl AinStr {
+    pub const EMPTY: &'static AinStr = AinStr::new("");
+
     /// Converts `&self` to a `&str` slice.
     #[inline]
     #[must_use]
@@ -84,6 +86,15 @@ impl AinStr {
         use crate::AinString;
 
         AinString::from(self.slice.to_vec())
+    }
+
+    /// Creates an &[AinStr] from a &[str]. The input must be valid ascii. This is intended for
+    /// primarily for usage in constants. Panics if the input is not valid ASCII.
+    pub const fn new(s: &str) -> &Self {
+        assert!(s.is_ascii());
+        // SAFETY: we checked that it's valid ascii and otherwise they're both u8 bytes.
+        let ptr = s as *const str as *const AinStr;
+        unsafe { &*ptr }
     }
 
     /// Converts anything that can represent a byte slice into an `AinStr`.
