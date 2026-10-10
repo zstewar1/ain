@@ -148,3 +148,40 @@ const RANK: [u8; 128] = [
 pub(super) fn rank(ch: AinChar) -> u8 {
     RANK[ch.to_u8() as usize]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(b: u8) -> u8 {
+        rank(AinChar::from_u8(b).unwrap())
+    }
+
+    #[test]
+    fn letters_share_a_rank_across_cases() {
+        for lower in b'a'..=b'z' {
+            assert_eq!(r(lower), r(lower.to_ascii_uppercase()), "{}", lower as char);
+        }
+    }
+
+    #[test]
+    fn common_text_characters_outrank_rare_ones() {
+        let max = (0u8..128).map(r).max().unwrap();
+        assert_eq!(r(b' '), max);
+        for (common, rare) in [
+            (b'e', b'z'),
+            (b't', b'x'),
+            (b'a', b'q'),
+            (b'n', b'j'),
+            (b'.', b'~'),
+            (b'\n', 0x01),
+        ] {
+            assert!(
+                r(common) > r(rare),
+                "{:?} should outrank {:?}",
+                common as char,
+                rare as char
+            );
+        }
+    }
+}

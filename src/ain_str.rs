@@ -1580,6 +1580,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn ord_upper_case() {
         assert_eq!(ain!("abcd").cmp(ain!("ABCD")), Ordering::Equal);
         assert_eq!(ain!("abcd").cmp(ain!("ABCe")), Ordering::Less);

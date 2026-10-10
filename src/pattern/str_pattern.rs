@@ -341,3 +341,24 @@ fn rare_match_from_end<M: MemchrMode>(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rare(needle: &str) -> (char, usize) {
+        let rare = RareChar::new(AinStr::from_str(needle).unwrap());
+        (rare.ch.to_char(), rare.offset)
+    }
+
+    #[test]
+    fn rare_char_prefers_uncommon_characters_and_the_first_on_ties() {
+        assert_eq!(rare("Elizabeth"), ('z', 3));
+        assert_eq!(rare("the quick brown fox"), ('q', 4));
+        assert_eq!(rare("aaa"), ('a', 0));
+        assert_eq!(rare("zz"), ('z', 0));
+        // Ranking folds case, but the character is kept as written.
+        assert_eq!(rare("ZaB"), ('Z', 0));
+        assert_eq!(rare("a"), ('a', 0));
+    }
+}

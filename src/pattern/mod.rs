@@ -43,7 +43,7 @@ mod str_pattern;
 /// # Examples
 ///
 /// ```
-/// # use ain::ain;
+/// # use ain::{ain, AinChar};
 /// // &AinStr
 /// assert_eq!(ain!("abaaa").find(ain!("BA")), Some(1));
 /// assert_eq!(ain!("abaaa").find(ain!("bac")), None);
@@ -53,21 +53,21 @@ mod str_pattern;
 /// assert_eq!(ain!("abaaa").find(ain!('b')), Some(1));
 /// assert_eq!(ain!("abaaa").find(ain!('c')), None);
 ///
-/// // // &[AinChar; N]
-/// // assert_eq!(ain!("ab").find(&[ain!('b'), ain!('A')]), Some(0));
-/// // assert_eq!(ain!("ABAAA").find(&[ain!('a'), ain!('z')]), Some(0));
-/// // assert_eq!(ain!("abaaa").find(&[ain!('c'), ain!('d')]), None);
+/// // &[AinChar; N]
+/// assert_eq!(ain!("ab").find(&[ain!('b'), ain!('A')]), Some(0));
+/// assert_eq!(ain!("ABAAA").find(&[ain!('a'), ain!('z')]), Some(0));
+/// assert_eq!(ain!("abaaa").find(&[ain!('c'), ain!('d')]), None);
 ///
-/// // // &[AinChar]
-/// // assert_eq!(ain!("ab").find(&[ain!('b'), ain!('A')][..]), Some(0));
-/// // assert_eq!(ain!("ABAAA").find(&[ain!('a'), ain!('z')][..]), Some(0));
-/// // assert_eq!(ain!("abaaa").find(&[ain!('c'), ain!('d')][..]), None);
+/// // &[AinChar]
+/// assert_eq!(ain!("ab").find(&[ain!('b'), ain!('A')][..]), Some(0));
+/// assert_eq!(ain!("ABAAA").find(&[ain!('a'), ain!('z')][..]), Some(0));
+/// assert_eq!(ain!("abaaa").find(&[ain!('c'), ain!('d')][..]), None);
 ///
-/// // // FnMut(AinChar) -> bool
-/// // assert_eq!(ain!("ABCDEF_Z").find(|ch| ch > ain!('d') && ch < ain!('y')), Some(4));
-/// // assert_eq!(ain!("abcddd_z").find(|ch| ch > ain!('d') && ch < ain!('y')), None);
-/// // // FnMut(AinChar) -> bool can force case sensitivity:
-/// // assert_eq!(ain!("abcddd_z").find(|ch| ch.to_u8() == b'A'), None);
+/// // FnMut(AinChar) -> bool
+/// assert_eq!(ain!("ABCDEF_Z").find(|ch| ch > ain!('d') && ch < ain!('y')), Some(4));
+/// assert_eq!(ain!("abcddd_z").find(|ch| ch > ain!('d') && ch < ain!('y')), None);
+/// // FnMut(AinChar) -> bool can force case sensitivity:
+/// assert_eq!(ain!("abcddd_z").find(|ch: AinChar| ch.to_u8() == b'A'), None);
 /// ```
 #[allow(private_bounds)]
 pub trait Pattern: Sized + Sealed {
