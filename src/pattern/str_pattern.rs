@@ -2,6 +2,7 @@ use core::ops::Range;
 
 use crate::{AinChar, AinStr};
 
+use super::byte_rank::rank;
 use super::memchr::{CasedMemchr, MemchrMode, UncasedMemchr};
 use super::{Pattern, Sealed, Searcher};
 
@@ -41,7 +42,7 @@ impl<'a> Pattern for &'a crate::AinString {
     type Searcher = StrSearcher<'a>;
 
     fn into_searcher(self) -> Self::Searcher {
-        <&AinStr as Pattern>::into_searcher(&*self)
+        <&AinStr as Pattern>::into_searcher(self)
     }
 
     fn start_match_split_point(&mut self, haystack: &AinStr) -> Option<usize> {
@@ -134,7 +135,7 @@ impl<'a> StrSearcher<'a> {
                 done: false,
             })
         } else {
-            StrSearcherImpl::Memchr(MemchrBloom::new(needle))
+            StrSearcherImpl::RareChar(RareChar::new(needle))
         };
         Self { needle, inner }
     }
@@ -167,7 +168,7 @@ impl<'a> Searcher for StrSearcher<'a> {
                     Some(0..0)
                 }
             }
-            StrSearcherImpl::Memchr(ref memchr) => {
+            StrSearcherImpl::RareChar(rare) => {
                 if haystack.len() < self.needle.len() {
                     return None;
                 }
@@ -177,47 +178,10 @@ impl<'a> Searcher for StrSearcher<'a> {
                         .into_searcher()
                         .next_match_from_start(haystack);
                 }
-
-                /// Match impl for needles of at least two characters.
-                #[inline(always)]
-                fn needle2_match_impl<M: MemchrMode>(
-                    first: AinChar,
-                    needle: &AinStr,
-                    memchr: &MemchrBloom,
-                    haystack: &AinStr,
-                ) -> Option<Range<usize>> {
-                    // The last possible index where the needle could start.
-                    let max_needle_start_index = haystack.len() - needle.len();
-                    // Offset tracks how far into the haystack we've searched so far.
-                    let mut offset = 0;
-                    while offset <= max_needle_start_index {
-                        // Note: inclusive range, because the needle could start at that index.
-                        let search_space = &haystack[offset..=max_needle_start_index];
-                        offset += M::memchr(first, search_space)?;
-                        let potential_end = offset + needle.len();
-                        let end_char = haystack[potential_end - 1];
-                        if memchr.bloom_matches(end_char) {
-                            if haystack[offset..potential_end] == needle {
-                                return Some(offset..potential_end);
-                            }
-                            // If the string doesn't match the needle, but the end char was in the
-                            // bloom filter set, advance by one, because we could have an
-                            // overlapping match.
-                            offset += 1;
-                        } else {
-                            // The end char wasn't in the bloom filter set at all, so we can skip
-                            // forward by the length of the needle.
-                            offset = potential_end;
-                        }
-                    }
-                    None
-                }
-
-                let first = self.needle[0];
-                if first.is_alphabetic() {
-                    needle2_match_impl::<UncasedMemchr>(first, self.needle, memchr, haystack)
+                if rare.ch.is_alphabetic() {
+                    rare_match_from_start::<UncasedMemchr>(rare, self.needle, haystack)
                 } else {
-                    needle2_match_impl::<CasedMemchr>(first, self.needle, memchr, haystack)
+                    rare_match_from_start::<CasedMemchr>(rare, self.needle, haystack)
                 }
             }
         }
@@ -250,7 +214,7 @@ impl<'a> Searcher for StrSearcher<'a> {
                     Some(idx..idx)
                 }
             }
-            StrSearcherImpl::Memchr(ref memchr) => {
+            StrSearcherImpl::RareChar(rare) => {
                 if haystack.len() < self.needle.len() {
                     return None;
                 }
@@ -258,50 +222,10 @@ impl<'a> Searcher for StrSearcher<'a> {
                 if self.needle.len() == 1 {
                     return self.needle[0].into_searcher().next_match_from_end(haystack);
                 }
-
-                /// Match impl for needles of at least two characters.
-                #[inline(always)]
-                fn needle2_rmatch_impl<M: MemchrMode>(
-                    last: AinChar,
-                    needle: &AinStr,
-                    memchr: &MemchrBloom,
-                    haystack: &AinStr,
-                ) -> Option<Range<usize>> {
-                    // The lowest index which could include the needle's end character.
-                    let min_needle_end_idx = needle.len() - 1;
-                    // The exclusive upper bound of characters which are still potentially being
-                    // searched.
-                    let mut end_offset = haystack.len();
-                    while min_needle_end_idx < end_offset {
-                        // Note: inclusive range, because the needle could end at that index.
-                        let search_space = &haystack[min_needle_end_idx..end_offset];
-                        // Add 1 here to keep this as an exclusive upper bound. In effect, this says
-                        // that end_offset is the possible 'end index' of needle.
-                        end_offset = min_needle_end_idx + M::memrchr(last, search_space)? + 1;
-                        let potential_start = end_offset - needle.len();
-                        let start_char = haystack[potential_start];
-                        if memchr.bloom_matches(start_char) {
-                            if haystack[potential_start..end_offset] == needle {
-                                return Some(potential_start..end_offset);
-                            }
-                            // If the string doesn't match the needle, but the start char was in the
-                            // bloom filter set, advance by one, because we could have an
-                            // overlapping match.
-                            end_offset -= 1;
-                        } else {
-                            // The start char wasn't in the bloom filter set at all, so we can skip
-                            // forward by the length of the needle.
-                            end_offset = potential_start;
-                        }
-                    }
-                    None
-                }
-
-                let last = self.needle[self.needle.len() - 1];
-                if last.is_alphabetic() {
-                    needle2_rmatch_impl::<UncasedMemchr>(last, self.needle, memchr, haystack)
+                if rare.ch.is_alphabetic() {
+                    rare_match_from_end::<UncasedMemchr>(rare, self.needle, haystack)
                 } else {
-                    needle2_rmatch_impl::<CasedMemchr>(last, self.needle, memchr, haystack)
+                    rare_match_from_end::<CasedMemchr>(rare, self.needle, haystack)
                 }
             }
         }
@@ -313,7 +237,8 @@ enum StrSearcherImpl {
     /// Needle is empty, so we track state to control when to advance and when to return the empty
     /// match.
     Empty(EmptyNeedle),
-    Memchr(MemchrBloom),
+    /// Needle is non-empty: scan for its rarest character and verify each candidate position.
+    RareChar(RareChar),
 }
 
 #[derive(Debug, Clone)]
@@ -329,41 +254,90 @@ struct EmptyNeedle {
     done: bool,
 }
 
-#[derive(Debug, Clone)]
-struct MemchrBloom {
-    /// A quick and dirty bloom filter ish thing of all the characters in the needle.
-    ///
-    /// Whenever we find the start character of the needle, we use this to quickly check whether the
-    /// end character appears anywhere in this bitset. If it doesn't appear in this bitset, then we
-    /// can skip forward by the length of the needle.
-    ///
-    /// We wrap the characters by masking with 0x1f, so we map 4  of each of the possible 128 bytes
-    /// to each bloom filter slot. However, this wrapping is convenient for us because it happens to
-    /// wrap uppercase and lowercase letters to the same slots! So For alphabetic data, the number
-    /// of colliding characters is only 3, and one of them is a punctuation mark.
-    bloom_filter: u32,
+/// The character of the needle expected to be rarest in typical haystacks (see [`rank`]), and its
+/// offset within the needle.
+///
+/// The haystack is scanned for this one character with memchr, and the whole needle is compared
+/// at each position found. Choosing the rarest character keeps the number of stops (and thus
+/// comparisons) low: scanning for `z` in `"Elizabeth"` stops far less often than scanning for `e`.
+#[derive(Debug, Clone, Copy)]
+struct RareChar {
+    ch: AinChar,
+    offset: usize,
 }
 
-impl MemchrBloom {
-    /// Create a new MemchrBloom by computing the mask over all the bytes of the needle.
+impl RareChar {
+    /// Picks the lowest-ranked character of a non-empty needle (the first such character on ties).
     #[inline]
     fn new(needle: &AinStr) -> Self {
-        let bloom_filter = needle
+        needle
             .chars()
-            .fold(0u32, |filter, ch| filter | Self::char_to_mask(ch));
-        Self { bloom_filter }
+            .enumerate()
+            .map(|(offset, ch)| RareChar { ch, offset })
+            .min_by_key(|rare| rank(rare.ch))
+            .expect("StrSearcher only uses RareChar for non-empty needles")
     }
 
-    /// Wrap the given char and use it to create a bitmask that selects the corresponding bit
-    /// number.
-    #[inline]
-    fn char_to_mask(ch: AinChar) -> u32 {
-        1 << (ch.to_u8() & 0x1f)
+    /// The part of `haystack` where the rare character of an actual match can be found.
+    ///
+    /// A match starting at `pos` has its rare character at `pos + offset`, and `pos` ranges over
+    /// `0..=haystack.len() - needle_len`, so the rare character of any match lies within
+    /// `haystack[offset..=haystack.len() - needle_len + offset]`. Conveniently, the index of a
+    /// rare character *within that window* is exactly the start index of the candidate match.
+    ///
+    /// The caller must ensure `haystack.len() >= needle_len`.
+    #[inline(always)]
+    fn window(self, needle_len: usize, haystack: &AinStr) -> &AinStr {
+        &haystack[self.offset..=haystack.len() - needle_len + self.offset]
     }
+}
 
-    /// Checks if the given char matches at the filter.
-    #[inline]
-    fn bloom_matches(&self, ch: AinChar) -> bool {
-        (self.bloom_filter & Self::char_to_mask(ch)) != 0
+/// Forward search for needles of at least one character; the caller must ensure
+/// `haystack.len() >= needle.len()`.
+#[inline(always)]
+fn rare_match_from_start<M: MemchrMode>(
+    rare: RareChar,
+    needle: &AinStr,
+    haystack: &AinStr,
+) -> Option<Range<usize>> {
+    let window = rare.window(needle.len(), haystack);
+    // Index within the window of the next candidate to consider. This is also the index within the
+    // haystack of the start of the corresponding needle.
+    let mut pos = 0;
+    while pos < window.len() {
+        // Probe one character before paying for a memchr call: memchr has a fixed per-call cost
+        // far above a single character compare, and when candidates are adjacent (a run of the
+        // rare character) that cost would otherwise be paid for every position.
+        if window[pos] != rare.ch {
+            pos += M::memchr(rare.ch, &window[pos..])?;
+        }
+        if haystack[pos..pos + needle.len()] == needle {
+            return Some(pos..pos + needle.len());
+        }
+        pos += 1;
     }
+    None
+}
+
+/// Reverse search for needles of at least one character; the caller must ensure
+/// `haystack.len() >= needle.len()`.
+#[inline(always)]
+fn rare_match_from_end<M: MemchrMode>(
+    rare: RareChar,
+    needle: &AinStr,
+    haystack: &AinStr,
+) -> Option<Range<usize>> {
+    let window = rare.window(needle.len(), haystack);
+    let mut pos = window.len();
+    while pos > 0 {
+        pos -= 1;
+        // Same one-character probe as the forward search.
+        if window[pos] != rare.ch {
+            pos = M::memrchr(rare.ch, &window[..pos])?;
+        }
+        if haystack[pos..pos + needle.len()] == needle {
+            return Some(pos..pos + needle.len());
+        }
+    }
+    None
 }

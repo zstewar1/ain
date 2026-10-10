@@ -11,6 +11,7 @@ pub use self::str_pattern::StrSearcher;
 
 trait Sealed {}
 
+mod byte_rank;
 mod char_pattern;
 mod char_set_pattern;
 mod fnmut_pattern;

@@ -6,7 +6,7 @@ use super::{DoubleEndedPattern, Pattern, Sealed, Searcher};
 
 impl<const N: usize> Sealed for &[AinChar; N] {}
 impl<const N: usize> DoubleEndedPattern for &[AinChar; N] {}
-impl<'a, const N: usize> Pattern for &'a [AinChar; N] {
+impl<const N: usize> Pattern for &[AinChar; N] {
     type Searcher = CharSetSearcher;
 
     #[inline]
