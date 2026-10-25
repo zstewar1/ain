@@ -326,6 +326,44 @@ impl AinStr {
         self.find(pattern).is_some()
     }
 
+    /// Returns true if this pattern starts with the given pattern.
+    ///
+    /// [`AinChar`] and [`&AinStr`][AinStr] based patterns match case-insensitive.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// assert_eq!(ain!("bAaC").starts_with(ain!('a')), false);
+    /// assert_eq!(ain!("bAaC").starts_with(ain!('B')), true);
+    /// assert_eq!(ain!("bAaC").starts_with(ain!("Ba")), true);
+    /// assert_eq!(ain!("bAaC").starts_with(ain!("bB")), false);
+    /// assert_eq!(ain!("bAaC").starts_with(ain!("Baac")), true);
+    /// assert_eq!(ain!("bAaC").starts_with(ain!("BaacC")), false);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn starts_with<P: Pattern>(&self, mut pattern: P) -> bool {
+        pattern.start_match_split_point(self).is_some()
+    }
+
+    /// Returns true if this pattern ends with the given pattern.
+    ///
+    /// [`AinChar`] and [`&AinStr`][AinStr] based patterns match case-insensitive.
+    ///
+    /// ```
+    /// # use ain::ain;
+    /// assert_eq!(ain!("bAaC").ends_with(ain!('a')), false);
+    /// assert_eq!(ain!("bAaC").ends_with(ain!('c')), true);
+    /// assert_eq!(ain!("bAaC").ends_with(ain!("aa")), false);
+    /// assert_eq!(ain!("bAaC").ends_with(ain!("ac")), true);
+    /// assert_eq!(ain!("bAaC").ends_with(ain!("baac")), true);
+    /// assert_eq!(ain!("bAaC").ends_with(ain!("zbAaC")), false);
+    /// ```
+    #[must_use]
+    #[inline]
+    pub fn ends_with<P: Pattern>(&self, mut pattern: P) -> bool {
+        pattern.end_match_split_point(self).is_some()
+    }
+
     /// Split this string slice at the given index.
     #[must_use]
     #[inline]

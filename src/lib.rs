@@ -51,6 +51,8 @@ mod ain_str;
 mod ain_string;
 #[cfg(feature = "alloc")]
 mod alloc_conversions;
+#[cfg(feature = "std")]
+mod std_conversions;
 #[cfg(feature = "ascii")]
 mod ascii_conversions;
 pub mod iter;
