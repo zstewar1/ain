@@ -1,6 +1,6 @@
 [package]
 name = "ain"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["Zachary Stewart <zachary.c.stewart@gmail.com>"]
 description = "Case-insensitive ASCII-only versions of String, &str, and char"

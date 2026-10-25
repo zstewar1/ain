@@ -58,6 +58,8 @@ pub mod iter;
 mod nightly_conversions;
 pub mod pattern;
 mod repr;
+#[cfg(feature = "std")]
+mod std_conversions;
 mod validation;
 
 pub use ain_char::{AinChar, TryIntoAinCharError};
